@@ -28,9 +28,9 @@ type Wallet = { info: { name: string; icon: string; rdns: string }; provider: an
 type Result = { before: [number, number]; after: [number, number] }
 /** What the proposer entered. Also stored in the link, so "edit as new batch" can bring it back. */
 type Draft = {
-  title: string; safes: string; mode: 'owners' | 'replicate'
+  safes: string[]; mode: 'owners' | 'replicate' // safes: one address per field, first is the main Safe
   edits: Record<string, string | null> // current owner (lowercase) → replacement, or null to remove
-  added: string[]; threshold: number | null; source: string; afterQueue: boolean
+  added: string[]; threshold: number | null; source: string
 }
 type Pick = Found & { selected: boolean }
 
@@ -39,12 +39,19 @@ const store = {
   get: <T>(k: string, d: T): T => { try { return JSON.parse(localStorage.getItem(k) ?? '') ?? d } catch { return d } },
   set: (k: string, v: unknown) => { try { localStorage.setItem(k, JSON.stringify(v)) } catch { storageOk = false } },
 }
-const blank = (): Draft => ({ title: '', safes: '', mode: 'owners', edits: {}, added: [], threshold: null, source: '', afterQueue: false })
+const blank = (): Draft => ({ safes: [''], mode: 'owners', edits: {}, added: [], threshold: null, source: '' })
+/** Reads a Safe address out of whatever was pasted: a plain address, chain:0x…, or a Safe{Wallet} link. */
+const addressIn = (s: string): Address | undefined => { const m = s.match(/0x[0-9a-fA-F]{40}(?![0-9a-fA-F])/); return m ? getAddress(m[0]) : undefined }
+/** Drafts saved by older versions kept all Safes in one text field. */
+const asDraft = (d: Omit<Partial<Draft>, 'safes'> & { safes?: unknown }): Draft => {
+  const safes = typeof d.safes === 'string' ? (d.safes.match(/0x[0-9a-fA-F]{40}/g) ?? []) : Array.isArray(d.safes) ? d.safes.map(String) : []
+  return { ...blank(), ...d, safes: safes.length ? safes : [''] }
+}
 
 const S = {
   mode: 'compose' as 'compose' | 'batch',
-  d: { ...blank(), ...store.get<Partial<Draft>>('safesync:draft', {}) } as Draft,
-  found: [] as Pick[], finding: false, lines: '', sourceNote: '',
+  d: asDraft(store.get<Partial<Draft>>('safesync:draft', {})),
+  found: [] as Pick[], looking: new Set<string>(), lines: '', sourceNote: '',
   preparing: false, prepared: [] as Prepared[], errors: [] as string[], names: {} as Record<string, Address>, link: '',
   batch: null as Batch | null, id: '', rows: [] as Row[], loadError: '', pasted: '',
   wallets: [] as Wallet[], provider: null as any, account: null as Address | null, choosing: false,
@@ -90,30 +97,33 @@ function edited() {
   store.set('safesync:draft', S.d); update()
 }
 
-/** Bare addresses are looked for on every chain; chain:0x… and Safe{Wallet} links name one Safe. */
-async function find() {
-  const tokens = S.d.safes.split(/[\s,]+/).filter(Boolean)
-  const exact: { chain: string; safe: string }[] = [], anywhere: string[] = []
-  for (const t of tokens) {
-    const m = t.match(/(?:safe=)?([a-z0-9-]+):(0x[0-9a-fA-F]{40})/i)
-    if (m) exact.push({ chain: m[1], safe: m[2] })
-    else if (isAddress(t)) anywhere.push(t)
-    else return (S.errors = [`"${t}" isn't a Safe address, chain:0xSafe or Safe{Wallet} link`]), update()
-  }
-  S.errors = []; S.finding = true; S.found = []; edited()
-  const results = await Promise.all([
-    ...anywhere.map(a => findSafe(getAddress(a))),
-    ...exact.map(async ({ chain, safe }): Promise<Found[]> => {
-      const c = chainOf(chain)
-      if (!c) { S.errors.push(`Unknown chain "${chain}"`); return [] }
-      try { return [{ chainId: c.id, safe: getAddress(safe), state: await readSafe(c.id, getAddress(safe)) }] } catch (e) { return [{ chainId: c.id, safe: getAddress(safe), error: msg(e) }] }
-    }),
-  ])
-  const seen = new Set<string>()
-  S.found = results.flat().filter(f => !seen.has(`${f.chainId}:${f.safe}`) && seen.add(`${f.chainId}:${f.safe}`)).map(f => ({ ...f, selected: !!f.state }))
-  if (!S.found.length) S.errors.push('No Safe found at that address on any chain.')
-  S.finding = false; update()
+/** Looks one Safe address up on every chain, replacing earlier results for it. */
+async function lookup(a: Address) {
+  if (S.looking.has(a)) return
+  S.looking.add(a); S.found = S.found.filter(f => f.safe !== a); edited()
+  const res = await findSafe(a)
+  S.looking.delete(a)
+  if (S.d.safes.some(x => addressIn(x) === a)) S.found = [...S.found.filter(f => f.safe !== a), ...res.map(f => ({ ...f, selected: !!f.state }))]
+  edited()
 }
+
+function setSafe(i: number, value: string) {
+  const before = addressIn(S.d.safes[i] ?? '')
+  S.d.safes[i] = value
+  const after = addressIn(value)
+  if (before && before !== after && !S.d.safes.some(x => addressIn(x) === before)) S.found = S.found.filter(f => f.safe !== before)
+  edited()
+  if (after && after !== before) lookup(after)
+}
+
+function removeSafe(i: number) {
+  const a = addressIn(S.d.safes[i])
+  S.d.safes.splice(i, 1)
+  if (a && !S.d.safes.some(x => addressIn(x) === a)) S.found = S.found.filter(f => f.safe !== a)
+  edited()
+}
+
+const lookupAll = () => [...new Set(S.d.safes.map(addressIn).filter((a): a is Address => !!a))].forEach(lookup)
 
 async function retry(p: Pick) {
   p.error = undefined; update()
@@ -121,7 +131,11 @@ async function retry(p: Pick) {
   edited()
 }
 
-const selected = () => S.found.filter(f => f.selected && f.state)
+/** Selected Safes, in the order their addresses were entered (lookups finish in any order). */
+const selected = () => {
+  const order = (f: Pick) => S.d.safes.findIndex(x => addressIn(x) === f.safe)
+  return S.found.filter(f => f.selected && f.state).sort((a, b) => order(a) - order(b))
+}
 
 /** The owner list most of the selected Safes share, in the order of the first one that has it. */
 function baseOwners() {
@@ -153,6 +167,7 @@ const validOwner = (s: string) => isAddress(s) || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.e
 
 async function loadSource() {
   const src = S.d.source.trim()
+  if (!src) return void (S.lines = '')
   try {
     if (src.startsWith('{')) {
       const j = JSON.parse(src)
@@ -198,7 +213,7 @@ async function prepare() {
     S.prepared = targets.map(x => ({ ...x, notes: ['checking the queue…'] }))
     update()
     await Promise.all(targets.map(async (x, i) => {
-      const p = await prepareTarget(x, a.actions, names, S.d.afterQueue ? queueEnd : undefined)
+      const p = await prepareTarget(x, a.actions, names)
       if (my !== run) return
       p.notes.unshift('checking the queue…')
       S.prepared[i] = p; update()
@@ -221,18 +236,12 @@ async function checkQueue(p: Prepared, my: number) {
   if (my === run) update()
 }
 
-async function queueEnd(chainId: number, safe: Address, nonce: number): Promise<number> {
-  if (!svc.serviceUrl(chainId)) return nonce
-  const q = await svc.queued(chainId, safe, nonce)
-  return Math.max(nonce, ...q.map(o => o.nonce + 1))
-}
-
 const prepKind = (p: Prepared) => (p.error ? 'attention' : p.skip ? 'synced' : p.tx ? 'ready' : 'loading')
 
 async function createLink() {
   const ready = S.prepared.filter(p => prepKind(p) === 'ready')
   const labels = Object.fromEntries(Object.entries(S.names).map(([n, a]) => [a.toLowerCase(), n]))
-  const batch: Batch = { title: S.d.title.trim() || 'Untitled batch', created: Date.now(), txs: ready.map(p => p.tx!), labels, src: S.d }
+  const batch: Batch = { title: titleFor(ready.map(p => p.tx!)), created: Date.now(), txs: ready.map(p => p.tx!), labels, src: S.d }
   S.link = `${location.href.split('#')[0]}#${await encodeBatch(batch)}`
   copy(S.link)
 }
@@ -399,7 +408,14 @@ async function signAll() {
       else r.error = msg(e)
     } finally { r.phase = undefined; update() }
   }
-  if (my === session) { S.signing = false; S.current = null; update() }
+  done(my)
+}
+
+/** A run that ends (or was paused) clears its marker, unless a newer run has taken over. */
+function done(my: number) {
+  if (my === session) S.signing = S.executing = false
+  if (!S.signing && !S.executing) S.current = null
+  update()
 }
 
 async function executeAll() {
@@ -434,7 +450,7 @@ async function executeAll() {
       else r.error = msg(e)
     } finally { r.phase = undefined; update() }
   }
-  if (my === session) { S.executing = false; S.current = null; update() }
+  done(my)
 }
 
 // Signatures the Safe service doesn't hold (no service on the chain, or upload failed) can be shared as a bundle.
@@ -467,10 +483,10 @@ function refresh() {
 function edit() {
   if (!S.batch) return
   const src = S.batch.src as Partial<Draft> | null
-  S.d = { ...blank(), ...(src && typeof src === 'object' ? src : {}), title: S.batch.title }
+  S.d = asDraft(src && typeof src === 'object' ? src : {})
   history.pushState(null, '', location.pathname + location.search)
-  S.mode = 'compose'; edited()
-  if (S.d.safes) find()
+  S.mode = 'compose'; S.found = []; edited()
+  lookupAll()
   if (S.d.mode === 'replicate' && S.d.source) loadSource()
 }
 
@@ -551,149 +567,137 @@ function changeView(txs: Tx[], result: (tx: Tx) => Result | undefined, labels: R
 
 // ---------------------------------------------------------------- compose view
 
+/** "Replace 2 owners on 15 Safes": the batch's title, from what it does. */
+function titleFor(txs: Tx[]): string {
+  const steps = describe(txs[0]), count = (fn: string) => steps.filter(st => st.target === 'self' && st.fn === fn).length
+  const parts = [
+    count('swapOwner') && `replace ${plural(count('swapOwner'), 'owner')}`, count('addOwnerWithThreshold') && `add ${plural(count('addOwnerWithThreshold'), 'owner')}`,
+    count('removeOwner') && `remove ${plural(count('removeOwner'), 'owner')}`, count('changeThreshold') && 'change the threshold',
+  ].filter(Boolean) as string[]
+  const calls = steps.filter(st => !(st.target === 'self' && OWNER_FNS.includes(st.fn)))
+  if (calls.length) parts.push(calls.length === 1 ? `call ${calls[0].fn}` : plural(calls.length, 'call'))
+  const t = parts.join(', ') || 'change'
+  return `${t[0].toUpperCase()}${t.slice(1)} on ${plural(txs.length, 'Safe')}`
+}
+
 function safesCard() {
-  const byAddress = new Map<string, Pick[]>()
-  for (const f of S.found) byAddress.set(f.safe, [...(byAddress.get(f.safe) ?? []), f])
-  const toggle = (f: Pick) => { if (f.state) { f.selected = !f.selected; edited() } else retry(f) }
-  return html`<section class="card">
-    <input class="title" placeholder="Title, like Rotate signers Q4" .value=${live(S.d.title)} @input=${(e: any) => { S.d.title = e.target.value; store.set('safesync:draft', S.d) }}>
-    <label><span>Safe</span>
+  const base = baseOwners(), key = (o: Address[]) => o.map(a => a.toLowerCase()).sort().join()
+  const differs = (f: Pick) => S.d.mode === 'owners' && f.selected && !!f.state && base.share !== base.total && key(f.state.owners) !== key(base.owners)
+  const block = (raw: string, i: number) => {
+    const a = addressIn(raw), list = S.found.filter(f => f.safe === a), ok = list.filter(f => f.state), bad = list.filter(f => !f.state)
+    return html`<div class="found">
       <div class="row">
-        <input class="grow mono" placeholder="0x… (looked for on every chain), eth:0x…, or a Safe{Wallet} link" .value=${live(S.d.safes)}
-          @input=${(e: any) => { S.d.safes = e.target.value; store.set('safesync:draft', S.d) }} @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && find()}>
-        <button class=${S.found.length ? '' : 'primary'} @click=${find} ?disabled=${S.finding || !S.d.safes.trim()}>${S.finding ? 'Looking…' : 'Find'}</button>
+        <input class="grow mono" spellcheck="false" placeholder="0x…" aria-label=${i ? 'Another Safe address' : 'Safe address'} .value=${live(raw)} @input=${(e: any) => setSafe(i, e.target.value)}>
+        ${i ? html`<button class="ghost" aria-label="Remove this address" @click=${() => removeSafe(i)}>✕</button>` : nothing}
       </div>
-      <small>A bare address is looked for on every chain. Add Safes at other addresses as <code>chain:0x…</code>, separated by spaces.</small>
-    </label>
-    ${[...byAddress.entries()].map(([safe, list]) => {
-      const ok = list.filter(f => f.state), bad = list.filter(f => !f.state)
-      return html`<div class="found">
-        <div class="small"><span class="mono" title=${safe}>${short(safe)}</span> · ${ok.length ? `found on ${plural(ok.length, 'chain')}` : 'not reachable'} · <span class="muted">${ok.filter(f => f.selected).length} selected</span></div>
-        <div class="chips">${ok.map(f => html`<button class=${`pick ${f.selected ? 'on' : ''}`} aria-pressed=${f.selected} title=${`${chainName(f.chainId)} · ${fmt([f.state!.threshold, f.state!.owners.length])} · nonce ${f.state!.nonce}`} @click=${() => toggle(f)}>${chainOf(f.chainId)?.short ?? f.chainId}</button>`)}</div>
-        ${bad.length ? html`<div class="small warn">Couldn't check ${bad.map(f => html`<button class="pick" title=${f.error ?? ''} @click=${() => toggle(f)}>${chainOf(f.chainId)?.short ?? f.chainId} ↻</button>`)}</div>` : nothing}
-      </div>`
-    })}
+      ${raw.trim() && !a ? html`<div class="small bad">Not an address</div>`
+      : a && S.looking.has(a) ? html`<div class="small muted">Searching every chain…</div>`
+      : a && !list.length ? html`<div class="small bad">Not found on any chain</div>` : nothing}
+      ${ok.length ? html`<div class="chips">${ok.map(f => html`<button class=${`pick ${f.selected ? 'on' : ''} ${differs(f) ? 'drift' : ''}`} aria-pressed=${f.selected}
+        title=${`${chainName(f.chainId)} · ${fmt([f.state!.threshold, f.state!.owners.length])}${differs(f) ? ' · different owners' : ''}`}
+        @click=${() => { f.selected = !f.selected; edited() }}>${f.selected ? '✓ ' : ''}${chainOf(f.chainId)?.short ?? f.chainId}</button>`)}</div>` : nothing}
+      ${bad.length ? html`<div class="chips">${bad.map(f => html`<button class="pick unreachable" title=${`Couldn't reach this chain: ${f.error ?? ''}`} @click=${() => retry(f)}>${chainOf(f.chainId)?.short ?? f.chainId} ↻</button>`)}</div>` : nothing}
+    </div>`
+  }
+  return html`<section class="card">
+    <h3>Safe</h3>
+    ${S.d.safes.map(block)}
+    ${S.found.some(f => f.state) ? html`<div><button class="ghost" @click=${() => { S.d.safes.push(''); edited() }}>+ Another address</button></div>` : nothing}
   </section>`
 }
 
 function ownersEditor() {
   const base = baseOwners(), t = targetOwners()
-  if (!base.total) return html`<p class="muted">Find a Safe first; its owners show up here to edit.</p>`
-  const drift = selected().filter(f => f.state!.owners.map(a => a.toLowerCase()).sort().join() !== base.owners.map(a => a.toLowerCase()).sort().join())
   const set = (o: string, v: string | null | undefined) => { if (v === undefined) delete S.d.edits[o.toLowerCase()]; else S.d.edits[o.toLowerCase()] = v; edited() }
   return html`
-    <p class="muted small">Edit the list into what every Safe should have. ${base.share === base.total ? `All ${plural(base.total, 'selected Safe')} have these owners now.` : `${base.share} of ${base.total} selected Safes have these owners now.`}
-      ${drift.length ? html`<span class="warn">Different now: ${drift.map(f => chainChip(f.chainId))}. They'll be brought in line.</span>` : nothing}</p>
     <div class="owners">${base.owners.map(o => {
       const e = S.d.edits[o.toLowerCase()]
       return html`<div class="owner">
         <span class=${e === null ? 'mono gone' : 'mono'} title=${o}>${short(o)}</span>
-        ${e === undefined ? html`<span class="muted small">keeps</span><span class="actions"><button class="ghost" @click=${() => set(o, '')}>Replace</button><button class="ghost" @click=${() => set(o, null)}>Remove</button></span>`
-        : e === null ? html`<span class="bad small">removed</span><span class="actions"><button class="ghost" @click=${() => set(o, undefined)}>Undo</button></span>`
-        : html`<input class="mono" placeholder="New owner: 0x… or name.eth" .value=${live(e)} @input=${(ev: any) => { S.d.edits[o.toLowerCase()] = ev.target.value; edited() }}><span class="actions"><button class="ghost" @click=${() => set(o, undefined)}>Undo</button></span>`}
+        ${e === undefined ? html`<span></span><span class="actions"><button class="ghost" @click=${() => set(o, '')}>Replace</button><button class="ghost" @click=${() => set(o, null)}>Remove</button></span>`
+        : e === null ? html`<span></span><span class="actions"><button class="ghost" @click=${() => set(o, undefined)}>Undo</button></span>`
+        : html`<span class="swap"><span class="muted">→</span><input class="mono" placeholder="New owner (0x… or name.eth)" .value=${live(e)} @input=${(ev: any) => { S.d.edits[o.toLowerCase()] = ev.target.value; edited() }}></span><span class="actions"><button class="ghost" @click=${() => set(o, undefined)}>Undo</button></span>`}
       </div>`
     })}
     ${S.d.added.map((a, i) => html`<div class="owner">
-      <span class="good small">new</span>
+      <span class="good small">New owner</span>
       <input class="mono" placeholder="0x… or name.eth" .value=${live(a)} @input=${(ev: any) => { S.d.added[i] = ev.target.value; edited() }}>
-      <span class="actions"><button class="ghost" @click=${() => { S.d.added.splice(i, 1); edited() }}>Remove</button></span>
+      <span class="actions"><button class="ghost" aria-label="Don't add" @click=${() => { S.d.added.splice(i, 1); edited() }}>✕</button></span>
     </div>`)}
     </div>
     <div class="row">
       <button class="ghost" @click=${() => { S.d.added.push(''); edited() }}>+ Add owner</button>
       <span class="grow"></span>
-      <label class="check">Threshold <input class="num" type="number" min="1" max=${t.owners.length} .value=${live(String(t.threshold))} @input=${(e: any) => { S.d.threshold = Number(e.target.value) || null; edited() }}> of ${t.owners.length}</label>
+      <label class="check">Signatures needed <input class="num" type="number" min="1" max=${t.owners.length} .value=${live(String(t.threshold))} @input=${(e: any) => { S.d.threshold = Number(e.target.value) || null; edited() }}> of ${t.owners.length}</label>
     </div>`
 }
 
 function replicateEditor() {
   return html`
-    <p class="muted small">Build the transaction once in Safe{Wallet}'s Transaction Builder, then paste its link (or the exported JSON) here. Owner changes are redone per Safe; the source Safe's own address becomes each Safe's.</p>
-    <textarea rows="3" spellcheck="false" placeholder="https://app.safe.global/transactions/tx?safe=eth:0x…&id=multisig_…   or   { Transaction Builder JSON }"
-      .value=${live(S.d.source)} @input=${(e: any) => { S.d.source = e.target.value; S.lines = ''; edited() }}></textarea>
-    <div class="row">
-      <span class="grow small ${S.lines ? 'good' : 'muted'}">${S.lines ? `✓ Loaded: ${S.sourceNote}` : ''}</span>
-      <button @click=${loadSource} ?disabled=${!S.d.source.trim()}>Load</button>
-    </div>
-    ${S.lines ? html`<details><summary>As it will be replicated</summary><pre class="mono small wrap">${S.lines}</pre></details>` : nothing}`
+    <textarea rows="3" spellcheck="false" aria-label="Transaction to copy" placeholder="Safe{Wallet} transaction link, or Transaction Builder JSON"
+      .value=${live(S.d.source)} @input=${(e: any) => { S.d.source = e.target.value; S.lines = ''; edited(); loadSource() }}></textarea>
+    ${S.lines ? html`<div class="small good">✓ ${S.sourceNote}</div>` : nothing}`
 }
 
 function composeView() {
   const by = (k: string) => S.prepared.filter(p => prepKind(p) === k)
   const ready = by('ready'), synced = by('synced'), attention = by('attention'), loading = by('loading')
-  const checking = S.prepared.filter(p => p.notes.includes('checking the queue…')).length
   const labels = Object.fromEntries(Object.entries(S.names).map(([n, a]) => [a.toLowerCase(), n]))
   const prepResult = (tx: Tx) => {
     const p = S.prepared.find(p => p.tx === tx)
     return p?.state && p.owners && p.threshold !== undefined ? { before: [p.state.threshold, p.state.owners.length], after: [p.threshold, p.owners.length] } as Result : undefined
   }
   const mode = (m: Draft['mode'], label: string) => html`<button class=${S.d.mode === m ? 'seg on' : 'seg'} aria-pressed=${S.d.mode === m} @click=${() => { S.d.mode = m; edited() }}>${label}</button>`
+  const n = selected().length
   return html`
   ${safesCard()}
-  <section class="card">
-    <div class="row"><span class="segs">${mode('owners', 'Owners and threshold')}${mode('replicate', 'Replicate a transaction')}</span></div>
+  ${n ? html`<section class="card">
+    <div class="row"><h3 class="grow">Change</h3><span class="segs">${mode('owners', 'Owners')}${mode('replicate', 'Other transaction')}</span></div>
     ${S.d.mode === 'owners' ? ownersEditor() : replicateEditor()}
-    <div class="row">
-      <label class="check"><input type="checkbox" .checked=${S.d.afterQueue} @change=${(e: any) => { S.d.afterQueue = e.target.checked; edited() }}> Queue after transactions already pending</label>
-      <span class="grow"></span>
-      <button class="primary" @click=${prepare} ?disabled=${S.preparing || !selected().length}>${S.preparing ? 'Preparing…' : `Prepare ${selected().length ? plural(selected().length, 'Safe') : ''}`}</button>
-    </div>
     ${S.errors.length ? html`<div class="errors">${S.errors.map(e => html`<div>${e}</div>`)}</div>` : nothing}
-  </section>
+    <div class="row"><span class="grow"></span><button class="primary" @click=${prepare} ?disabled=${S.preparing}>${S.preparing ? 'Checking…' : `Review ${plural(n, 'Safe')}`}</button></div>
+  </section>` : S.errors.length ? html`<div class="errors">${S.errors.map(e => html`<div>${e}</div>`)}</div>` : nothing}
 
   ${S.prepared.length ? html`
   <section class="card">
     <div class="summary">
-      <span class="good">✓ ${ready.length} ready</span>
+      <span>${ready.length} ready to sign</span>
       ${synced.length ? html` · <span class="muted">${synced.length} already in sync</span>` : nothing}
       ${attention.length ? html` · <span class="bad">${attention.length} need${attention.length === 1 ? 's' : ''} attention</span>` : nothing}
-      ${loading.length ? html` · <span class="muted">${loading.length} reading…</span>` : nothing}
+      ${loading.length ? html` · <span class="muted">${loading.length} checking…</span>` : nothing}
     </div>
-    ${Object.keys(S.names).length ? html`<div class="muted small">Resolved on Ethereum: ${Object.entries(S.names).map(([n, a]) => html`${n} → <span class="mono">${a}</span> `)}</div>` : nothing}
     ${ready.length ? changeView(ready.map(p => p.tx!), prepResult, labels) : nothing}
-    <div class="scroll"><table>
-      <thead><tr><th></th><th>Chain</th><th>Safe</th><th>Nonce</th><th>Owners</th><th>Notes</th></tr></thead>
-      <tbody>${S.prepared.map(p => {
-        const k = prepKind(p)
-        return html`<tr>
-          <td class="ico-cell">${k === 'ready' ? html`<span class="ico done">✓</span>` : k === 'synced' ? html`<span class="ico done quiet">✓</span>` : k === 'attention' ? html`<span class="ico warn">!</span>` : html`<span class="ico now"></span>`}</td>
-          <td>${chainChip(p.chainId)}</td>
-          <td>${addr(p.safe, labels)}</td>
-          <td>${p.tx?.nonce ?? p.state?.nonce ?? ''}</td>
-          <td class="nowrap">${p.state ? (p.owners && p.threshold !== undefined && (p.owners.length !== p.state.owners.length || p.threshold !== p.state.threshold) ? `${fmt([p.state.threshold, p.state.owners.length])} → ${fmt([p.threshold, p.owners.length])}` : fmt([p.state.threshold, p.state.owners.length])) : ''}</td>
-          <td class="small">
-            ${p.error ? html`<span class="bad">${p.error}</span>` : p.skip ? html`<span class="muted">${p.skip}</span>` : nothing}
-            ${p.sim && !p.sim.ok && !p.sim.definite ? html`<span class="warn">${p.sim.error}</span>` : nothing}
-            <span class=${p.notes.some(n => n.startsWith('⚠')) ? 'warn' : 'muted'}>${p.notes.join('; ')}</span>
-          </td>
-        </tr>`
-      })}</tbody>
-    </table></div>
-    <div class="row">
-      <span class="grow muted small">The link covers the ${plural(ready.length, 'ready Safe')}.${checking ? ` Still checking ${plural(checking, 'queue')} for conflicts; signers see conflicts too.` : ''} Whoever executes pays gas.</span>
-      <button class="primary" @click=${createLink} ?disabled=${S.preparing || !ready.length}>Create signing link</button>
-    </div>
+    <div class="scroll"><table class="list"><tbody>${S.prepared.map(p => {
+      const k = prepKind(p), notes = p.notes.filter(x => x !== 'checking the queue…')
+      return html`<tr>
+        <td class="ico-cell">${k === 'ready' ? html`<span class="ico todo" title="Needs signatures"></span>` : k === 'synced' ? html`<span class="ico idle" title="Already in sync">–</span>` : k === 'attention' ? html`<span class="ico warn" title="Needs attention">!</span>` : html`<span class="ico now"></span>`}</td>
+        <td>${chainChip(p.chainId)}</td>
+        <td>${addr(p.safe, labels)}</td>
+        <td class="grow-cell small">
+          ${p.error ? html`<span class="bad">${p.error}</span>` : p.skip ? html`<span class="muted">${p.skip}</span>` : nothing}
+          ${p.sim && !p.sim.ok && !p.sim.definite ? html`<span class="warn">${p.sim.error}</span>` : nothing}
+          ${notes.length ? html`<span class=${notes.some(x => x.startsWith('⚠')) ? 'warn' : 'muted'}>${notes.join('; ')}</span>` : nothing}
+        </td>
+      </tr>`
+    })}</tbody></table></div>
     ${S.link ? html`<div class="linkbox">
-      <input readonly .value=${live(S.link)} @focus=${(e: any) => e.target.select()}>
-      <button @click=${() => copy(S.link)}>Copy</button>
-      <a class="button primary" href=${S.link}>Open to sign</a>
-      <div class="muted small">Share it in your team chat. The link holds the whole batch; nothing is stored on a server.</div>
-    </div>` : nothing}
+      <input readonly aria-label="Signing link" .value=${live(S.link)} @focus=${(e: any) => e.target.select()}>
+      <button @click=${() => copy(S.link)}>Copy link</button>
+      <a class="button primary" href=${S.link}>Sign now</a>
+    </div>` : html`<div class="row"><span class="grow"></span><button class="primary" @click=${createLink} ?disabled=${S.preparing || !ready.length}>Create signing link</button></div>`}
   </section>` : nothing}`
 }
 
 // ---------------------------------------------------------------- batch view
 
-/** The checklist mark for one Safe, from the connected signer's point of view. */
+/** The connected signer's checklist: ✓ you signed it, ○ it needs your signature, – nothing for you to do, ! a problem. */
 function icon(r: Row, kind: Kind) {
   if (r === S.current) return html`<span class="ico now"></span>`
-  if (kind === 'blocked') return html`<span class="ico warn">!</span>`
-  if (kind === 'unknown') return html`<span class="ico todo quiet">?</span>`
-  if (mine(r) || kind === 'executed') return html`<span class="ico done">✓</span>`
-  if (canSign(r)) return html`<span class="ico todo"></span>`
-  if (S.account && (kind === 'ready' || kind === 'waiting')) return html`<span class="ico done quiet" title="Has enough signatures without yours">✓</span>`
-  if (S.account && r.owners && !isOwner(r, S.account)) return html`<span class="ico idle" title="You are not an owner">–</span>`
-  return html`<span class="ico todo quiet"></span>`
+  if (kind === 'blocked') return html`<span class="ico warn" title="Problem">!</span>`
+  if (!S.account) return html`<span class="ico todo quiet"></span>`
+  if (mine(r)) return html`<span class="ico done" title="You signed this">✓</span>`
+  if (canSign(r)) return html`<span class="ico todo" title="Needs your signature"></span>`
+  return html`<span class="ico idle" title="Nothing for you to do">–</span>`
 }
 const KIND_CLASS: Record<Kind, string> = { loading: 'muted', collecting: '', ready: 'good', waiting: 'muted', executed: 'good', blocked: 'bad', unknown: 'warn' }
 
@@ -701,12 +705,12 @@ function rowResult(tx: Tx): Result | undefined {
   const r = S.rows.find(r => r.tx === tx)
   if (!r?.owners || r.threshold === undefined || !needsWork(r)) return
   let n = r.owners.length, t = r.threshold
-  for (const s of describe(tx)) {
-    if (s.target !== 'self') continue
-    const a = Object.fromEntries(s.args)
-    if (s.fn === 'addOwnerWithThreshold') n++, t = Number(a._threshold)
-    if (s.fn === 'removeOwner') n--, t = Number(a._threshold)
-    if (s.fn === 'changeThreshold') t = Number(a._threshold)
+  for (const st of describe(tx)) {
+    if (st.target !== 'self') continue
+    const a = Object.fromEntries(st.args)
+    if (st.fn === 'addOwnerWithThreshold') n++, t = Number(a._threshold)
+    if (st.fn === 'removeOwner') n--, t = Number(a._threshold)
+    if (st.fn === 'changeThreshold') t = Number(a._threshold)
   }
   return { before: [r.threshold, r.owners.length], after: [t, n] }
 }
@@ -719,8 +723,8 @@ function progressView() {
   const executed = S.rows.filter(r => status(r).kind === 'executed').length
   const busy = S.signing || S.executing || S.waiting
   const pending = (r: Row) => (r.svc === 'ok' ? unshared(r) : [])
-  const uploading = S.rows.reduce((n, r) => n + pending(r).filter(s => s.uploading).length, 0)
-  const notUploaded = S.rows.reduce((n, r) => n + pending(r).filter(s => !s.uploading).length, 0)
+  const uploading = S.rows.reduce((n, r) => n + pending(r).filter(x => x.uploading).length, 0)
+  const notUploaded = S.rows.reduce((n, r) => n + pending(r).filter(x => !x.uploading).length, 0)
   const manual = S.rows.filter(r => r.svc === 'none' && needsWork(r) && Object.keys(r.sigs).length)
   const bar = html`<div class="bar"><i style=${`width:${yours.length ? Math.round((signed / yours.length) * 100) : 0}%`}></i></div>`
   const cur = S.current
@@ -728,36 +732,32 @@ function progressView() {
   ${!S.account ? html`<div class="row">
       <button class="primary" @click=${() => connect()}>Connect wallet</button>
       ${S.choosing ? S.wallets.map(w => html`<button @click=${() => connect(w)}><img src=${w.info.icon} alt="">${w.info.name}</button>`) : nothing}
-      <span class="muted grow">Connect the wallet you sign with to see which Safes need you.</span>
     </div>`
   : S.signing ? html`<div class="row"><b class="grow">Signing ${Math.min(signed + 1, yours.length)} of ${yours.length}</b><button @click=${() => stop()}>Pause</button></div>
       ${bar}
       ${cur ? html`<div class="current">
-        <div><b>${chainName(cur.tx.chainId)}</b> · ${addr(cur.tx.safe)} · nonce ${cur.tx.nonce} · <span class="muted">${cur.phase ?? ''}</span></div>
+        <div><b>${chainName(cur.tx.chainId)}</b> · ${addr(cur.tx.safe)} · <span class="muted">${cur.phase ?? ''}</span></div>
         <div class="hashes"><span class="muted">safeTxHash</span><span class="mono">${cur.hash}</span></div>
         <div class="hashes"><span class="muted">domain hash</span><span class="mono">${domainHash(cur.tx)}</span></div>
         <div class="hashes"><span class="muted">message hash</span><span class="mono">${messageHash(cur.tx)}</span></div>
       </div>` : nothing}`
   : remaining ? html`<div class="row">
-      <span class="grow">${addr(S.account)} · you've signed <b>${signed}</b> of ${yours.length}${loading ? html` <span class="muted">(still loading)</span>` : nothing}</span>
-      <button class="primary" @click=${signAll} ?disabled=${busy}>${S.waiting ? 'Waiting for your wallet…' : `Sign remaining ${remaining}`}</button>
+      <span class="grow">${addr(S.account)} · signed ${signed} of ${yours.length}</span>
+      <button class="primary" @click=${signAll} ?disabled=${busy}>${S.waiting ? 'Waiting for wallet…' : `Sign ${remaining}`}</button>
     </div>${bar}`
-  : yours.length ? html`
-      ${uploading && !notUploaded && !manual.length ? html`<div class="done-msg">✓ Signing complete. <span class="muted">Uploading ${plural(uploading, 'signature')}…</span></div>`
-      : notUploaded || manual.length ? html`<div class="done-msg warn">✓ Signing complete, but ${[
-        notUploaded ? `${plural(notUploaded, 'signature')} didn't upload yet` : '',
-        manual.length ? html`${manual.map(r => chainChip(r.tx.chainId))} ${manual.length === 1 ? 'needs' : 'need'} signatures shared by hand` : '',
-      ].filter(Boolean).map((x, i) => html`${i ? ' and ' : ''}${x}`)}.</div>
-      <div class="row">${notUploaded ? html`<button @click=${refresh}>Retry upload</button>` : nothing}<button @click=${() => copy(exportSigs())}>Copy signatures to share</button></div>`
-      : html`<div class="done-msg">✓ You've signed all ${yours.length}. Nothing else is needed from you.</div>`}${bar}`
-  : html`<div class="muted">${loading ? 'Checking which Safes need your signature…' : html`${addr(S.account)} has nothing to sign: it isn't an owner here, or every Safe already has enough signatures.`}</div>`}
+  : yours.length ? html`<div class="row">
+      <span class="done-msg grow">✓ Signed all ${yours.length}${uploading && !notUploaded ? html` <span class="muted small">uploading…</span>` : nothing}</span>
+      ${notUploaded ? html`<button @click=${refresh}>Retry upload (${notUploaded})</button>` : nothing}
+      ${manual.length ? html`<button @click=${() => copy(exportSigs())}>Copy signatures for ${manual.map(r => chainChip(r.tx.chainId))}</button>` : nothing}
+    </div>${bar}`
+  : html`<div class="muted">${loading ? 'Loading…' : html`${addr(S.account)} · nothing to sign`}</div>`}
   <div class="row small">
-    <span class="grow muted">Executed <b>${executed}</b> of ${S.rows.length}${ready ? html` · <b class="good">${ready} ready to execute</b> (anyone can, and pays gas)` : nothing}</span>
+    <span class="grow muted">Executed ${executed} of ${S.rows.length}</span>
     ${S.account && ready && !busy ? html`<button @click=${executeAll}>Execute ${ready}</button>` : nothing}
     ${S.executing ? html`<button @click=${() => stop()}>Stop</button>` : nothing}
-    <button class="ghost" @click=${refresh} ?disabled=${busy} title="Re-read the chain and the Safe service">↻ Refresh</button>
+    <button class="ghost" aria-label="Refresh" title="Refresh" @click=${refresh} ?disabled=${busy}>↻</button>
   </div>
-  ${!storageOk ? html`<div class="notice">This browser can't save signatures. Keep the tab open until they're uploaded, or copy them below.</div>` : nothing}
+  ${!storageOk ? html`<div class="notice">This browser can't save signatures</div>` : nothing}
   ${S.notice ? html`<div class="notice">${S.notice}</div>` : nothing}`
 }
 
@@ -770,17 +770,16 @@ function batchView() {
   <section class="card">
     <div class="row">
       <h2 class="grow">${b.title}</h2>
-      <span class="fingerprint" title="Fingerprint of every safeTxHash in this batch. Confirm it with the proposer.">${S.id}</span>
+      <span class="fingerprint" title="Fingerprint of every transaction in this link. Confirm it with whoever sent it.">${S.id}</span>
+      <button class="ghost" @click=${edit}>Edit</button>
     </div>
-    <div class="muted small">${plural(S.rows.length, 'Safe')} · ${plural(new Set(S.rows.map(r => r.tx.chainId)).size, 'chain')} · created ${new Date(b.created).toLocaleString()}
-      · <a href="#" @click=${(e: Event) => { e.preventDefault(); copy(location.href) }}>copy link</a> · <a href="#" @click=${(e: Event) => { e.preventDefault(); edit() }}>edit as new batch</a></div>
     ${changeView(b.txs, rowResult, b.labels)}
   </section>
 
   <section class="card sticky">${progressView()}</section>
 
-  <section class="card list">
-    <div class="scroll"><table><tbody>${S.rows.map(r => {
+  <section class="card">
+    <div class="scroll"><table class="list"><tbody>${S.rows.map(r => {
       const st = status(r)
       const link = safeLink(r.tx, r.proposed ? r.hash : undefined)
       const conflict = r.others.some(o => !o.isExecuted) && needsWork(r)
@@ -789,17 +788,16 @@ function batchView() {
         <td class="ico-cell">${icon(r, st.kind)}</td>
         <td>${chainChip(r.tx.chainId)}</td>
         <td>${addr(r.tx.safe)}</td>
-        <td class="muted nowrap nonce-cell">nonce ${r.tx.nonce}</td>
         <td class="grow-cell">
           <span class=${KIND_CLASS[st.kind]}>${r === S.current && r.phase ? r.phase : st.text}</span>
-          ${r.svc === 'none' ? html` <span class="tag" title="No Safe Transaction Service on this chain: share signatures with a bundle">manual</span>` : nothing}
-          ${conflict ? html`<div class="small warn">⚠ Another transaction is also queued at nonce ${r.tx.nonce}; only one of them can execute.</div>` : nothing}
+          ${conflict ? html`<div class="small warn">⚠ competes with another transaction at nonce ${r.tx.nonce}</div>` : nothing}
           ${r.error && st.kind !== 'unknown' ? html`<div class="small bad">${r.error}</div>` : nothing}
         </td>
         <td><button class="ghost disclose" aria-expanded=${!!r.open} aria-label=${`Details for ${chainName(r.tx.chainId)}`} @click=${(e: Event) => { e.stopPropagation(); toggle() }}>${r.open ? '▾' : '▸'}</button></td>
       </tr>
-      ${r.open ? html`<tr class="details"><td></td><td colspan="5">
+      ${r.open ? html`<tr class="details"><td></td><td colspan="4">
         <div class="kv">
+          <span>nonce</span><span class="mono">${r.tx.nonce}</span>
           <span>to</span><span class="mono wrap">${r.tx.to}</span>
           <span>value</span><span class="mono">${r.tx.value}</span>
           <span>operation</span><span>${r.tx.operation === 1 ? 'DELEGATECALL (1)' : 'CALL (0)'}</span>
@@ -808,7 +806,7 @@ function batchView() {
           <span>safeTxHash</span><span class="mono wrap">${r.hash}</span>
           <span>domain hash</span><span class="mono wrap">${domainHash(r.tx)}</span>
           <span>message hash</span><span class="mono wrap">${messageHash(r.tx)}</span>
-          <span>signed by</span><span>${validSigs(r).map(s => html`<div>${addr(s.owner)}${r.svc === 'ok' && !s.posted ? html` <span class="warn">not uploaded</span>` : nothing}</div>`)}</span>
+          <span>signed by</span><span>${validSigs(r).map(x => html`<div>${addr(x.owner)}${r.svc === 'ok' && !x.posted ? html` <span class="warn">not uploaded</span>` : nothing}</div>`)}</span>
           ${link ? html`<span>open in</span><span><a href=${link} target="_blank" rel="noopener">${chainOf(r.tx.chainId)?.service ? 'Safe{Wallet}' : 'explorer'}</a>${r.execHash ? html` · <a href=${`${chainOf(r.tx.chainId)?.explorer}/tx/${r.execHash}`} target="_blank" rel="noopener">execution</a>` : nothing}</span>` : nothing}
         </div>
       </td></tr>` : nothing}`
@@ -816,15 +814,10 @@ function batchView() {
   </section>
 
   ${manual.length || toShare ? html`<section class="card">
-    <h3>Share signatures by hand</h3>
-    <p class="muted small">
-      ${manual.length ? html`${manual.map(r => chainChip(r.tx.chainId))} ${manual.length === 1 ? 'has' : 'have'} no Safe Transaction Service. ` : nothing}
-      ${toShare ? `${plural(toShare, 'signature')} here ${toShare === 1 ? "isn't" : "aren't"} on the Safe service. ` : nothing}
-      Copy the bundle into your team chat; whoever executes pastes everyone's bundles.
-    </p>
+    <div class="row"><h3 class="grow">Share signatures</h3>${manual.map(r => chainChip(r.tx.chainId))}</div>
     <div class="row">
       <button @click=${() => copy(exportSigs())} ?disabled=${!toShare}>Copy ${plural(toShare, 'signature')}</button>
-      <textarea class="grow" rows="2" placeholder="Paste one or more safesync-sigs:… bundles" .value=${live(S.pasted)} @input=${(e: any) => { S.pasted = e.target.value; update() }}></textarea>
+      <textarea class="grow" rows="1" aria-label="Paste signatures" placeholder="Paste signatures" .value=${live(S.pasted)} @input=${(e: any) => { S.pasted = e.target.value; update() }}></textarea>
       <button @click=${importSigs} ?disabled=${!S.pasted.trim()}>Add</button>
     </div>
   </section>` : nothing}`
@@ -836,12 +829,9 @@ function settingsView() {
   const set = (k: 'rpc' | 'service' | 'apiKey') => (e: any) => (S.settings[k] = e.target.value)
   return html`<div class="modal" @click=${(e: Event) => e.target === e.currentTarget && ((S.settingsOpen = false), update())}><section class="card">
     <h3>Settings</h3>
-    <label><span>RPC overrides</span><textarea rows="4" spellcheck="false" placeholder="1 https://my-node.example\narb1 https://…" .value=${live(S.settings.rpc)} @input=${set('rpc')}></textarea>
-      <small>One <code>chain url</code> per line. Also adds chains that are not listed below.</small></label>
-    <label><span>Safe Transaction Service overrides</span><textarea rows="2" spellcheck="false" placeholder="167000 https://safe-transaction.example.xyz" .value=${live(S.settings.service)} @input=${set('service')}></textarea>
-      <small>For chains with a community-run service.</small></label>
-    <label><span>Safe API key (optional)</span><input .value=${live(S.settings.apiKey)} @input=${set('apiKey')} placeholder="Raises the monthly request quota">
-      <small>Stored only in this browser. Requests stay at 1 per second either way.</small></label>
+    <label><span>RPCs</span><textarea rows="4" spellcheck="false" placeholder="1 https://…\narb1 https://…" .value=${live(S.settings.rpc)} @input=${set('rpc')}></textarea></label>
+    <label><span>Safe Transaction Services</span><textarea rows="2" spellcheck="false" placeholder="167000 https://…" .value=${live(S.settings.service)} @input=${set('service')}></textarea></label>
+    <label><span>Safe API key</span><input .value=${live(S.settings.apiKey)} @input=${set('apiKey')} placeholder="Optional"></label>
     ${S.settingsErrors.length ? html`<div class="errors">${S.settingsErrors.map(e => html`<div>${e}</div>`)}</div>` : nothing}
     <div class="row"><span class="grow"></span><button class="primary" @click=${() => {
       S.settingsErrors = applySettings()
@@ -857,8 +847,7 @@ function settingsView() {
 function view(): TemplateResult {
   return html`
   <header>
-    <a class="brand" href=${location.pathname + location.search} @click=${(e: Event) => { if (S.mode === 'batch') { e.preventDefault(); history.pushState(null, '', location.pathname + location.search); S.mode = 'compose'; update() } }}>Safe Sync</a>
-    <span class="muted small grow">keep a Safe the same on every chain</span>
+    <a class="brand grow" href=${location.pathname + location.search} @click=${(e: Event) => { if (S.mode === 'batch') { e.preventDefault(); history.pushState(null, '', location.pathname + location.search); S.mode = 'compose'; update() } }}>Safe Sync</a>
     <button class="ghost" @click=${() => { S.settingsOpen = true; update() }}>Settings</button>
   </header>
   <main>${S.mode === 'batch' ? batchView() : composeView()}</main>
@@ -870,7 +859,7 @@ function route() {
   if (h) openBatch(h)
   else {
     S.mode = 'compose'; update()
-    if (S.d.safes && !S.found.length && !S.finding) find()
+    if (!S.found.length) lookupAll()
     if (S.d.mode === 'replicate' && S.d.source && !S.lines) loadSource()
   }
 }

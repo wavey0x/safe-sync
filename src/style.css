@@ -59,9 +59,13 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 
 /* Compose: Safes, owners, mode */
 .found { display: grid; gap: 6px; }
+.label-strong { font-weight: 600; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .pick { font-family: var(--mono); font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 5px; color: var(--muted); }
 .pick.on { background: var(--active); border-color: var(--accent); color: var(--fg); }
+.pick.drift { border-color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn); }
+.pick.unreachable { color: var(--warn); border-style: dashed; }
+.swap { display: flex; gap: 8px; align-items: center; min-width: 0; } .swap input { flex: 1; min-width: 0; }
 .owners { display: grid; gap: 4px; }
 .owner { display: grid; grid-template-columns: minmax(110px, max-content) minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--line); }
 .owner input { padding: 5px 8px; }
@@ -85,7 +89,6 @@ pre { margin: 6px 0 0; white-space: pre-wrap; }
 /* Checklist marks */
 .ico { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; font-size: 12px; font-weight: 800; line-height: 1; }
 .ico.done { background: var(--good); color: var(--accent-fg); animation: pop .35s ease-out; }
-.ico.done.quiet { background: transparent; color: var(--good); box-shadow: inset 0 0 0 1.5px var(--good); animation: none; }
 .ico.todo { box-shadow: inset 0 0 0 1.5px var(--muted); }
 .ico.todo.quiet { box-shadow: inset 0 0 0 1.5px var(--line); }
 .ico.idle { color: var(--muted); }

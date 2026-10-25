@@ -12,25 +12,24 @@ HTML file: no server, no database, no accounts.
 
 **Proposer**
 
-1. **Safe:** paste the Safe's address. Safe Sync looks for it on every chain and lists where it found
-   it; click a chain to leave it out. Add Safes at other addresses as `chain:0x…` or a Safe{Wallet} link.
+1. **Safe:** paste its address. It's looked up on every chain, and each chain it's on shows up as a
+   chip; click a chip to leave that chain out. **+ Another address** adds a Safe that was deployed at a
+   different address on some chains.
 2. **Change**, one of two kinds:
-   - **Owners and threshold:** the current owner list appears. Edit it into what every Safe should have:
-     *Replace* or *Remove* an owner, *+ Add owner* (addresses or name.eth), and set the threshold. Each
-     Safe is compared with that list on its own. A Safe that already matches is left alone, and one that
-     drifted (an extra or missing owner) is brought in line. No calldata, no `prevOwner`.
-   - **Replicate a transaction:** for anything else, build the transaction once in Safe{Wallet}'s
-     Transaction Builder, then paste its link or the exported JSON. Owner changes in it are redone per
-     Safe, and the source Safe's own address becomes each Safe's. DELEGATECALLs are refused, and every
-     call target must exist on each chain.
-3. **Prepare:** each Safe is built, simulated from its own context, and hash-checked against the Safe
-   contract. Results come back as ready, already in sync, or needs attention. The review states the
-   change in plain words ("Replace 0x99BC… → winthorpe.eth · Threshold stays 5-of-9"); exact calldata
-   sits behind *Technical details*.
-4. **Create signing link** and post it in the team chat. Editing anything throws the results away, so a
-   link never carries stale transactions.
+   - **Owners:** the current owners are listed. *Replace* or *Remove* any of them, *+ Add owner*
+     (address or name.eth), and set *Signatures needed*. Each Safe is compared with the resulting list
+     on its own, so a Safe that already matches is skipped and one that drifted is brought in line.
+     Chips with different owners are marked amber.
+   - **Other transaction:** paste a Safe{Wallet} transaction link or a Transaction Builder JSON. Owner
+     changes in it are redone per Safe, and the source Safe's own address becomes each Safe's.
+     DELEGATECALLs are refused, and every call target must exist on each chain.
+3. **Review:** each Safe is built, simulated from its own context, and hash-checked against the Safe
+   contract. Results come back as ready, already in sync, or needs attention, with the change in plain
+   words. Exact calldata sits behind *Technical details*.
+4. **Create signing link**, then *Copy link* or *Sign now*. Editing anything throws the results away, so
+   a link never carries stale transactions.
 
-**Signers**: open the link, compare the fingerprint with the proposer's, connect, then click **Sign remaining N**.
+**Signers**: open the link, check the code next to the title with whoever sent it, connect, then click **Sign N**. The title says what the link does ("Replace 2 owners on 15 Safes").
 
 - Every Safe is listed. The one being signed is highlighted, with its safeTxHash, domain hash and
   message hash to compare against the device. Each Safe turns into a green check as it completes.
