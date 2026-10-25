@@ -120,7 +120,7 @@ export async function startSandbox({ basePort = 0, servicePort = 0, rps = 2, log
       if (rc.status !== 'success') throw new Error('setup execution failed')
     }
     // `targets`/`actions` are the change in the text format (tests); `draft` is the same change for the app's editor.
-    const finish = (service: ReturnType<typeof startMockService>, s: { team: Address; original?: Address; scroll141?: Address; targets: string; actions: string; owners: Address[]; draft: { safes: string[]; edits: Record<string, string>; added: string[] } }) => ({
+    const finish = (service: ReturnType<typeof startMockService>, s: { team: Address; original?: Address; scroll141?: Address; targets: string; actions: string; owners: Address[]; draft: Record<string, unknown> }) => ({
       ...s, chains: chains.map(({ id, rpc }) => ({ id, rpc })), rpc, service,
       serviceChains: ids.filter(id => !noService.has(id)), noServiceChains: [...noService],
       settings: {
@@ -139,7 +139,7 @@ export async function startSandbox({ basePort = 0, servicePort = 0, rps = 2, log
       const service = startMockService({ port: servicePort, rps, rpc, log })
       return finish(service, {
         team: safes[0], targets: `${safes[0]} ${ids.join(' ')}`, actions: `add ${ACCOUNTS[2].address}\nadd ${ACCOUNTS[3].address}`, owners: safeOwners,
-        draft: { safes: [safes[0]], edits: {}, added: [ACCOUNTS[2].address, ACCOUNTS[3].address] },
+        draft: { safes: [safes[0]], owners: [...safeOwners.map(o => ({ from: o, to: o })), { to: ACCOUNTS[2].address }, { to: ACCOUNTS[3].address }], threshold: safeOwners.length, startedFrom: `${ids[0]}:${safes[0]}` },
       })
     }
 
@@ -185,7 +185,11 @@ export async function startSandbox({ basePort = 0, servicePort = 0, rps = 2, log
 
     return finish(service, {
       team, original, scroll141, targets, actions, owners,
-      draft: { safes: [team, original, scroll141], edits: { [owners[2].toLowerCase()]: INCOMING[0].address, [owners[0].toLowerCase()]: INCOMING[1].address }, added: [] },
+      // Replaced in the same order as the proposal queued on the original Safe, so its signature counts.
+      draft: {
+        safes: [team, original, scroll141], threshold: 5, startedFrom: `1:${team}`,
+        owners: owners.map(o => (o === owners[2] ? { from: o, to: INCOMING[0].address, at: 1 } : o === owners[0] ? { from: o, to: INCOMING[1].address, at: 2 } : { from: o, to: o })),
+      },
     })
   } catch (e) { stopChains(); throw e }
 }
@@ -200,7 +204,7 @@ if (import.meta.main) {
     const owner = sb.owners.indexOf(a.address), incoming = INCOMING.findIndex(i => i.address === a.address)
     return { address: a.address, label: owner >= 0 ? `Owner ${owner + 1}${signers.includes(a.address) ? ' (yours)' : ''}` : incoming >= 0 ? `Incoming owner ${incoming + 1}` : 'Not an owner' }
   })
-  const draft = { mode: 'owners', threshold: null, source: '', ...sb.draft }
+  const draft = { mode: 'owners', source: '', excluded: [], ...sb.draft }
   const boot = `window.__SANDBOX__=${JSON.stringify({ runId, rpcs: sb.rpc, accounts: labels, settings: sb.settings, draft, walletOnly: !simple })};\n${await Bun.file(`${root}test/sandbox-wallet.js`).text()}`
   const server = Bun.serve({
     port,

@@ -161,3 +161,15 @@ test('a Transaction Builder JSON goes through the same owner-change conversion a
   expect(lines.split('\n')).toEqual([`swap ${OWNERS[4]} ${NAMES['winthorpe.eth']}`, '0x1111111111111111111111111111111111111111 0xabcdef00{self}'])
   expect(parseActions(JSON.stringify(json)).actions[0]).toEqual({ kind: 'swap', old: OWNERS[4], new: NAMES['winthorpe.eth'] })
 })
+
+test('a stored target stays put after partial execution: no duplicates, no double counting', () => {
+  const [a, b, c, d] = ['0xa', '0xb', '0xc', '0xd'].map(v => getAddress(v.padEnd(42, '1')))
+  // The proposer's 2-of-2 → 2-of-4 target, saved once.
+  const sync = { kind: 'sync' as const, owners: [a, b, c, d], threshold: 2, replace: [] as [string, string][] }
+  const notYet = buildCalls([sync], a, { version: '1.3.0', owners: [a, b], threshold: 2, nonce: 0 }, {})
+  expect(notYet.calls.map(k => k.data.slice(0, 10))).toEqual(['0x0d582f13', '0x0d582f13'])
+  // A Safe where it already executed: nothing to do, rather than "add c and d again".
+  expect(buildCalls([sync], a, { version: '1.3.0', owners: [d, c, a, b], threshold: 2, nonce: 1 }, {}).calls).toHaveLength(0)
+  // Half done by hand: only the missing owner.
+  expect(buildCalls([sync], a, { version: '1.3.0', owners: [c, a, b], threshold: 2, nonce: 1 }, {}).owners).toEqual([d, c, a, b])
+})

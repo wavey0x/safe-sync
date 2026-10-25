@@ -27,10 +27,14 @@ type Row = {
 type Wallet = { info: { name: string; icon: string; rdns: string }; provider: any }
 type Result = { before: [number, number]; after: [number, number] }
 /** What the proposer entered. Also stored in the link, so "edit as new batch" can bring it back. */
+/** One owner in the target: `from` is who it started as (none for an added owner), `to` who it becomes (null: removed). */
+type OwnerRow = { from?: string; to: string | null; at?: number } // at: when it was replaced, so replacements keep that order
 type Draft = {
   safes: string[]; mode: 'owners' | 'replicate' // safes: one address per field, first is the main Safe
-  edits: Record<string, string | null> // current owner (lowercase) → replacement, or null to remove
-  added: string[]; threshold: number | null; source: string
+  // The target, copied once from a Safe and then only edited: never recomputed from what the chains hold now.
+  owners: OwnerRow[]; threshold: number | null; startedFrom: string // startedFrom: "chainId:safe"
+  excluded: string[] // "chainId:safe" of chains left out
+  source: string
 }
 type Pick = Found & { selected: boolean }
 
@@ -39,14 +43,16 @@ const store = {
   get: <T>(k: string, d: T): T => { try { return JSON.parse(localStorage.getItem(k) ?? '') ?? d } catch { return d } },
   set: (k: string, v: unknown) => { try { localStorage.setItem(k, JSON.stringify(v)) } catch { storageOk = false } },
 }
-const blank = (): Draft => ({ safes: [''], mode: 'owners', edits: {}, added: [], threshold: null, source: '' })
+const blank = (): Draft => ({ safes: [''], mode: 'owners', owners: [], threshold: null, startedFrom: '', excluded: [], source: '' })
 /** Reads a Safe address out of whatever was pasted: a plain address, chain:0x…, or a Safe{Wallet} link. */
 const addressIn = (s: string): Address | undefined => { const m = s.match(/0x[0-9a-fA-F]{40}(?![0-9a-fA-F])/); return m ? getAddress(m[0]) : undefined }
 /** Drafts saved by older versions kept all Safes in one text field. */
 const asDraft = (d: Omit<Partial<Draft>, 'safes'> & { safes?: unknown }): Draft => {
   const safes = typeof d.safes === 'string' ? (d.safes.match(/0x[0-9a-fA-F]{40}/g) ?? []) : Array.isArray(d.safes) ? d.safes.map(String) : []
-  return { ...blank(), ...d, safes: safes.length ? safes : [''] }
+  const list = <T>(v: unknown): T[] => (Array.isArray(v) ? v : [])
+  return { ...blank(), ...d, safes: safes.length ? safes : [''], owners: list<OwnerRow>(d.owners), excluded: list<string>(d.excluded) }
 }
+const keyOf = (f: { chainId: number; safe: string }) => `${f.chainId}:${f.safe}`
 
 const S = {
   mode: 'compose' as 'compose' | 'batch',
@@ -55,7 +61,7 @@ const S = {
   preparing: false, prepared: [] as Prepared[], errors: [] as string[], names: {} as Record<string, Address>, link: '',
   batch: null as Batch | null, id: '', rows: [] as Row[], loadError: '', pasted: '',
   wallets: [] as Wallet[], provider: null as any, account: null as Address | null, choosing: false,
-  signing: false, executing: false, waiting: false, current: null as Row | null, notice: '',
+  signing: false, executing: false, waiting: false, current: null as Row | null, notice: '', copied: false,
   settingsOpen: false, settingsErrors: [] as string[], settings: store.get('safesync:settings', { rpc: '', service: '', apiKey: '' }),
 }
 
@@ -103,7 +109,23 @@ async function lookup(a: Address) {
   S.looking.add(a); S.found = S.found.filter(f => f.safe !== a); edited()
   const res = await findSafe(a)
   S.looking.delete(a)
-  if (S.d.safes.some(x => addressIn(x) === a)) S.found = [...S.found.filter(f => f.safe !== a), ...res.map(f => ({ ...f, selected: !!f.state }))]
+  if (S.d.safes.some(x => addressIn(x) === a)) S.found = [...S.found.filter(f => f.safe !== a), ...res.map(f => ({ ...f, selected: !!f.state && !S.d.excluded.includes(keyOf(f)) }))]
+  startTarget(); edited()
+}
+
+/** The first time Safes are found, their owners become the editable target (the list most of them share). */
+function startTarget() {
+  if (S.d.owners.length) return
+  const base = baseOwners()
+  if (!base.from) return
+  S.d.owners = base.owners.map(o => ({ from: o, to: o }))
+  S.d.threshold = base.threshold
+  S.d.startedFrom = keyOf(base.from)
+}
+
+function toggle(f: Pick) {
+  f.selected = !f.selected
+  S.d.excluded = f.selected ? S.d.excluded.filter(k => k !== keyOf(f)) : [...S.d.excluded, keyOf(f)]
   edited()
 }
 
@@ -112,6 +134,8 @@ function setSafe(i: number, value: string) {
   S.d.safes[i] = value
   const after = addressIn(value)
   if (before && before !== after && !S.d.safes.some(x => addressIn(x) === before)) S.found = S.found.filter(f => f.safe !== before)
+  // A different main Safe starts a new target.
+  if (i === 0 && after !== before) S.d.owners = [], S.d.threshold = null, S.d.startedFrom = ''
   edited()
   if (after && after !== before) lookup(after)
 }
@@ -127,8 +151,8 @@ const lookupAll = () => [...new Set(S.d.safes.map(addressIn).filter((a): a is Ad
 
 async function retry(p: Pick) {
   p.error = undefined; update()
-  try { p.state = await readSafe(p.chainId, p.safe); p.selected = true } catch (e) { p.error = msg(e) }
-  edited()
+  try { p.state = await readSafe(p.chainId, p.safe); p.selected = !S.d.excluded.includes(keyOf(p)) } catch (e) { p.error = msg(e) }
+  startTarget(); edited()
 }
 
 /** Selected Safes, in the order their addresses were entered (lookups finish in any order). */
@@ -145,20 +169,15 @@ function baseOwners() {
   const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
   const first = sel.find(f => top && key(f.state!.owners) === top[0])
   const thresholds = sel.filter(f => f === first || (top && key(f.state!.owners) === top[0])).map(f => f.state!.threshold)
-  return { owners: first?.state!.owners ?? [], threshold: thresholds.sort((a, b) => thresholds.filter(x => x === b).length - thresholds.filter(x => x === a).length)[0] ?? 1, share: top?.[1] ?? 0, total: sel.length }
+  return { from: first, owners: first?.state!.owners ?? [], threshold: thresholds.sort((a, b) => thresholds.filter(x => x === b).length - thresholds.filter(x => x === a).length)[0] ?? 1 }
 }
 
-/** The owner list every Safe should end up with, built from the base list and the edits. */
+/** The owner list every Safe should end up with, straight from the stored target. */
 function targetOwners() {
-  const base = baseOwners()
-  const kept = base.owners.flatMap(o => { const e = S.d.edits[o.toLowerCase()]; return e === null ? [] : [e && e.trim() ? e.trim() : o] })
-  const owners = [...kept, ...S.d.added.map(a => a.trim()).filter(Boolean)]
-  // In the order the replacements were made, which is also the order someone queuing it by hand would use.
-  const replace = Object.entries(S.d.edits).flatMap(([k, e]) => {
-    const o = base.owners.find(b => b.toLowerCase() === k)
-    return o && e && e.trim() ? [[o, e.trim()] as [string, string]] : []
-  })
-  return { owners, replace, threshold: S.d.threshold ?? Math.min(base.threshold, owners.length || 1) }
+  const owners = S.d.owners.flatMap(r => (r.to === null ? [] : [r.to.trim() || r.from || ''])).filter(Boolean)
+  const replace = S.d.owners.filter(r => r.from && r.to?.trim() && r.to.trim().toLowerCase() !== r.from.toLowerCase())
+    .sort((a, b) => (a.at ?? 0) - (b.at ?? 0)).map(r => [r.from!, r.to!.trim()] as [string, string])
+  return { owners, replace, threshold: S.d.threshold ?? 1 }
 }
 
 const validOwner = (s: string) => isAddress(s) || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.eth$/i.test(s)
@@ -168,6 +187,7 @@ const validOwner = (s: string) => isAddress(s) || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.e
 async function loadSource() {
   const src = S.d.source.trim()
   if (!src) return void (S.lines = '')
+  const current = () => S.d.source.trim() === src // a slower answer for an older paste must not land
   try {
     if (src.startsWith('{')) {
       const j = JSON.parse(src)
@@ -178,12 +198,13 @@ async function loadSource() {
       const chain = chainOf(src.match(/safe=([a-z0-9-]+):/i)?.[1] ?? src.match(/^([a-z0-9-]+):0x/i)?.[1] ?? '')
       if (!hash || !chain) throw new Error('Paste a Safe{Wallet} transaction link, or a Transaction Builder JSON file')
       const t = await svc.getTx(chain.id, hash)
+      if (!current()) return
       if (!t) throw new Error('That transaction isn\'t in the Safe Transaction Service')
       S.lines = linesFromTx(t)
       S.sourceNote = `From ${chain.name} ${short(t.safe)}, nonce ${t.nonce}`
     }
     S.errors = []
-  } catch (e) { S.lines = ''; S.sourceNote = ''; S.errors = [msg(e)] }
+  } catch (e) { if (!current()) return; S.lines = ''; S.sourceNote = ''; S.errors = [msg(e)] }
   edited()
 }
 
@@ -238,12 +259,17 @@ async function checkQueue(p: Prepared, my: number) {
 
 const prepKind = (p: Prepared) => (p.error ? 'attention' : p.skip ? 'synced' : p.tx ? 'ready' : 'loading')
 
-async function createLink() {
-  const ready = S.prepared.filter(p => prepKind(p) === 'ready')
-  const labels = Object.fromEntries(Object.entries(S.names).map(([n, a]) => [a.toLowerCase(), n]))
-  const batch: Batch = { title: titleFor(ready.map(p => p.tx!)), created: Date.now(), txs: ready.map(p => p.tx!), labels, src: S.d }
-  S.link = `${location.href.split('#')[0]}#${await encodeBatch(batch)}`
-  copy(S.link)
+/** Builds the link (once per Review) and copies it; the button itself says "Copied". */
+async function copyLink() {
+  if (!S.link) {
+    const ready = S.prepared.filter(p => prepKind(p) === 'ready')
+    const labels = Object.fromEntries(Object.entries(S.names).map(([n, a]) => [a.toLowerCase(), n]))
+    const title = titleFor(ready.map(p => ({ tx: p.tx!, owners: p.state?.owners, threshold: p.state?.threshold })))
+    S.link = `${location.href.split('#')[0]}#${await encodeBatch({ title, created: Date.now(), txs: ready.map(p => p.tx!), labels, src: S.d })}`
+  }
+  await navigator.clipboard?.writeText(S.link).catch(() => {})
+  S.copied = true; update()
+  setTimeout(() => { S.copied = false; update() }, 2000)
 }
 
 // ---------------------------------------------------------------- batch
@@ -482,6 +508,7 @@ function refresh() {
 
 function edit() {
   if (!S.batch) return
+  stop()
   const src = S.batch.src as Partial<Draft> | null
   S.d = asDraft(src && typeof src === 'object' ? src : {})
   history.pushState(null, '', location.pathname + location.search)
@@ -565,10 +592,90 @@ function changeView(txs: Tx[], result: (tx: Tx) => Result | undefined, labels: R
   })
 }
 
+type OwnerChange = { swaps: [string, string][]; adds: string[]; removes: string[]; threshold?: number }
+/** The owner operations a transaction makes, or null if it does anything else. Read from the calldata, not the draft. */
+function ownerChange(tx: Tx): OwnerChange | null {
+  const c: OwnerChange = { swaps: [], adds: [], removes: [] }
+  for (const st of describe(tx)) {
+    const a = Object.fromEntries(st.args)
+    if (st.target !== 'self' || st.op !== 0) return null
+    if (st.fn === 'swapOwner') c.swaps.push([a.oldOwner, a.newOwner])
+    else if (st.fn === 'addOwnerWithThreshold') c.adds.push(a.owner), (c.threshold = Number(a._threshold))
+    else if (st.fn === 'removeOwner') c.removes.push(a.owner), (c.threshold = Number(a._threshold))
+    else if (st.fn === 'changeThreshold') c.threshold = Number(a._threshold)
+    else return null
+  }
+  return c
+}
+function applyChange(owners: string[], threshold: number, c: OwnerChange) {
+  let o = owners.map(x => x.toLowerCase())
+  for (const [a, b] of c.swaps) o = o.map(x => (x === a.toLowerCase() ? b.toLowerCase() : x))
+  o = [...c.adds.map(x => x.toLowerCase()), ...o].filter(x => !c.removes.some(r => r.toLowerCase() === x))
+  return { owners: o, threshold: c.threshold ?? threshold }
+}
+/** "replace 2 owners, threshold 5 → 4": what one Safe's transaction does. */
+function changeText(c: OwnerChange, before?: number) {
+  const parts = [c.swaps.length && `replace ${plural(c.swaps.length, 'owner')}`, c.adds.length && `add ${plural(c.adds.length, 'owner')}`, c.removes.length && `remove ${plural(c.removes.length, 'owner')}`].filter(Boolean) as string[]
+  if (c.threshold !== undefined && before !== undefined && c.threshold !== before) parts.push(`threshold ${before} → ${c.threshold}`)
+  return parts.join(', ')
+}
+const mostCommon = (xs: string[]) => [...xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map<string, number>())].sort((a, b) => b[1] - a[1])[0]?.[0]
+
+type Item = { tx: Tx; owners?: Address[]; threshold?: number; done?: boolean } // done: already executed, so owners are already the result
+/**
+ * For owner changes, the review leads with the configuration every Safe ends up with; what differs per Safe goes on its row.
+ * Anything else falls back to the step-by-step summary.
+ */
+function reviewView(items: Item[], labels: Record<string, string>) {
+  const known = items.filter(i => i.owners && i.threshold !== undefined)
+  const changes = items.map(i => ownerChange(i.tx))
+  const generic = () => changeView(items.map(i => i.tx), tx => {
+    const i = items.find(x => x.tx === tx)!, c = ownerChange(tx)
+    if (!i.owners || i.threshold === undefined || i.done || !c) return undefined
+    const a = applyChange(i.owners, i.threshold, c)
+    return { before: [i.threshold, i.owners.length], after: [a.threshold, a.owners.length] }
+  }, labels)
+  if (!known.length || changes.some(c => !c)) return generic()
+  const after = known.map(i => (i.done ? { owners: i.owners!.map(o => o.toLowerCase()), threshold: i.threshold! } : applyChange(i.owners!, i.threshold!, ownerChange(i.tx)!)))
+  const sig = (a: { owners: string[]; threshold: number }) => `${[...a.owners].sort().join()}|${a.threshold}`
+  if (new Set(after.map(sig)).size !== 1) return generic()
+  const final = after[0], first = known.find(i => !i.done) ?? known[0], before = first.owners!.map(o => o.toLowerCase())
+  const removed = before.filter(o => !final.owners.includes(o))
+  const payloads = new Map<string, Tx[]>()
+  for (const { tx } of items) payloads.set(payloadKey(tx), [...(payloads.get(payloadKey(tx)) ?? []), tx])
+  return html`<div class="change">
+    <div class="muted small">Owners after, on all ${plural(items.length, 'Safe')}</div>
+    <div class="chips">${final.owners.map(o => html`<span class=${`owner-chip ${before.includes(o) ? '' : 'new'}`}>${addr(getAddress(o), labels)}${before.includes(o) ? nothing : html` <b class="good">new</b>`}</span>`)}</div>
+    ${removed.length ? html`<div class="chips"><span class="muted small">Removed</span>${removed.map(o => html`<span class="owner-chip gone">${addr(getAddress(o), labels)}</span>`)}</div>` : nothing}
+    <div class="result">${final.threshold} of ${final.owners.length} signatures needed${first.threshold !== final.threshold || before.length !== final.owners.length ? html` <span class="muted">(was ${first.threshold} of ${before.length})</span>` : nothing}</div>
+    <details><summary>Technical details</summary>
+      ${[...payloads.values()].map(list => html`<div class="payload">
+        ${payloads.size > 1 ? html`<div class="muted small">${plural(list.length, 'Safe')}: ${list.map(t => chainChip(t.chainId))}</div>` : nothing}
+        ${steps(describe(list[0]), labels)}
+        ${list[0].operation === 1 ? html`<div class="muted small">Sent through MultiSendCallOnly ${short(list[0].to)} (delegatecall), so the inner calls run as the Safe.</div>` : nothing}
+      </div>`)}
+    </details>
+  </div>`
+}
+
+/** Per-Safe exceptions: a row only says what it changes when that differs from what most Safes change. */
+function exceptions(items: Item[]) {
+  const texts = items.map(i => { const c = ownerChange(i.tx); return c ? changeText(c, i.threshold) : '' })
+  const common = mostCommon(texts)
+  return (i: number) => (texts[i] && texts[i] !== common ? texts[i] : '')
+}
+
 // ---------------------------------------------------------------- compose view
 
-/** "Replace 2 owners on 15 Safes": the batch's title, from what it does. */
-function titleFor(txs: Tx[]): string {
+/** "Replace 2 owners on 15 Safes": the batch's title, from what every Safe's transaction does. */
+function titleFor(items: Item[]): string {
+  const changes = items.map(i => ownerChange(i.tx))
+  if (changes.every(Boolean)) {
+    const texts = new Set(changes.map((c, i) => changeText(c!, items[i].threshold)))
+    const t = texts.size === 1 ? [...texts][0] || 'update owners' : 'update owners'
+    return `${t[0].toUpperCase()}${t.slice(1)} on ${plural(items.length, 'Safe')}`
+  }
+  const txs = items.map(i => i.tx)
   const steps = describe(txs[0]), count = (fn: string) => steps.filter(st => st.target === 'self' && st.fn === fn).length
   const parts = [
     count('swapOwner') && `replace ${plural(count('swapOwner'), 'owner')}`, count('addOwnerWithThreshold') && `add ${plural(count('addOwnerWithThreshold'), 'owner')}`,
@@ -581,8 +688,8 @@ function titleFor(txs: Tx[]): string {
 }
 
 function safesCard() {
-  const base = baseOwners(), key = (o: Address[]) => o.map(a => a.toLowerCase()).sort().join()
-  const differs = (f: Pick) => S.d.mode === 'owners' && f.selected && !!f.state && base.share !== base.total && key(f.state.owners) !== key(base.owners)
+  const key = (o: string[]) => o.map(a => a.toLowerCase()).sort().join(), start = key(S.d.owners.flatMap(r => (r.from ? [r.from] : [])))
+  const differs = (f: Pick) => S.d.mode === 'owners' && f.selected && !!f.state && !!S.d.owners.length && key(f.state.owners) !== start
   const block = (raw: string, i: number) => {
     const a = addressIn(raw), list = S.found.filter(f => f.safe === a), ok = list.filter(f => f.state), bad = list.filter(f => !f.state)
     return html`<div class="found">
@@ -595,7 +702,7 @@ function safesCard() {
       : a && !list.length ? html`<div class="small bad">Not found on any chain</div>` : nothing}
       ${ok.length ? html`<div class="chips">${ok.map(f => html`<button class=${`pick ${f.selected ? 'on' : ''} ${differs(f) ? 'drift' : ''}`} aria-pressed=${f.selected}
         title=${`${chainName(f.chainId)} · ${fmt([f.state!.threshold, f.state!.owners.length])}${differs(f) ? ' · different owners' : ''}`}
-        @click=${() => { f.selected = !f.selected; edited() }}>${f.selected ? '✓ ' : ''}${chainOf(f.chainId)?.short ?? f.chainId}</button>`)}</div>` : nothing}
+        @click=${() => toggle(f)}>${f.selected ? '✓ ' : ''}${chainOf(f.chainId)?.short ?? f.chainId}</button>`)}</div>` : nothing}
       ${bad.length ? html`<div class="chips">${bad.map(f => html`<button class="pick unreachable" title=${`Couldn't reach this chain: ${f.error ?? ''}`} @click=${() => retry(f)}>${chainOf(f.chainId)?.short ?? f.chainId} ↻</button>`)}</div>` : nothing}
     </div>`
   }
@@ -607,26 +714,23 @@ function safesCard() {
 }
 
 function ownersEditor() {
-  const base = baseOwners(), t = targetOwners()
-  const set = (o: string, v: string | null | undefined) => { if (v === undefined) delete S.d.edits[o.toLowerCase()]; else S.d.edits[o.toLowerCase()] = v; edited() }
+  const t = targetOwners(), start = S.found.find(f => keyOf(f) === S.d.startedFrom)
+  const set = (i: number, patch: Partial<OwnerRow>) => { Object.assign(S.d.owners[i], patch); edited() }
   return html`
-    <div class="owners">${base.owners.map(o => {
-      const e = S.d.edits[o.toLowerCase()]
-      return html`<div class="owner">
-        <span class=${e === null ? 'mono gone' : 'mono'} title=${o}>${short(o)}</span>
-        ${e === undefined ? html`<span></span><span class="actions"><button class="ghost" @click=${() => set(o, '')}>Replace</button><button class="ghost" @click=${() => set(o, null)}>Remove</button></span>`
-        : e === null ? html`<span></span><span class="actions"><button class="ghost" @click=${() => set(o, undefined)}>Undo</button></span>`
-        : html`<span class="swap"><span class="muted">→</span><input class="mono" placeholder="New owner (0x… or name.eth)" .value=${live(e)} @input=${(ev: any) => { S.d.edits[o.toLowerCase()] = ev.target.value; edited() }}></span><span class="actions"><button class="ghost" @click=${() => set(o, undefined)}>Undo</button></span>`}
-      </div>`
-    })}
-    ${S.d.added.map((a, i) => html`<div class="owner">
-      <span class="good small">New owner</span>
-      <input class="mono" placeholder="0x… or name.eth" .value=${live(a)} @input=${(ev: any) => { S.d.added[i] = ev.target.value; edited() }}>
-      <span class="actions"><button class="ghost" aria-label="Don't add" @click=${() => { S.d.added.splice(i, 1); edited() }}>✕</button></span>
-    </div>`)}
+    ${start ? html`<div class="muted small">Starting from ${chainChip(start.chainId)} ${addr(start.safe)}</div>` : nothing}
+    <div class="owners">${S.d.owners.map((r, i) => r.from ? html`<div class="owner">
+        <span class=${r.to === null ? 'mono gone' : 'mono'} title=${r.from}>${short(r.from)}</span>
+        ${r.to === r.from ? html`<span></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: '', at: Date.now() })}>Replace</button><button class="ghost" @click=${() => set(i, { to: null })}>Remove</button></span>`
+        : r.to === null ? html`<span></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: r.from, at: undefined })}>Undo</button></span>`
+        : html`<span class="swap"><span class="muted">→</span><input class="mono" placeholder="New owner (0x… or name.eth)" .value=${live(r.to)} @input=${(ev: any) => { r.to = ev.target.value; edited() }}></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: r.from, at: undefined })}>Undo</button></span>`}
+      </div>` : html`<div class="owner">
+        <span class="good small">New owner</span>
+        <input class="mono" placeholder="0x… or name.eth" .value=${live(r.to ?? '')} @input=${(ev: any) => { r.to = ev.target.value; edited() }}>
+        <span class="actions"><button class="ghost" aria-label="Don't add" @click=${() => { S.d.owners.splice(i, 1); edited() }}>✕</button></span>
+      </div>`)}
     </div>
     <div class="row">
-      <button class="ghost" @click=${() => { S.d.added.push(''); edited() }}>+ Add owner</button>
+      <button class="ghost" @click=${() => { S.d.owners.push({ to: '' }); edited() }}>+ Add owner</button>
       <span class="grow"></span>
       <label class="check">Signatures needed <input class="num" type="number" min="1" max=${t.owners.length} .value=${live(String(t.threshold))} @input=${(e: any) => { S.d.threshold = Number(e.target.value) || null; edited() }}> of ${t.owners.length}</label>
     </div>`
@@ -643,10 +747,8 @@ function composeView() {
   const by = (k: string) => S.prepared.filter(p => prepKind(p) === k)
   const ready = by('ready'), synced = by('synced'), attention = by('attention'), loading = by('loading')
   const labels = Object.fromEntries(Object.entries(S.names).map(([n, a]) => [a.toLowerCase(), n]))
-  const prepResult = (tx: Tx) => {
-    const p = S.prepared.find(p => p.tx === tx)
-    return p?.state && p.owners && p.threshold !== undefined ? { before: [p.state.threshold, p.state.owners.length], after: [p.threshold, p.owners.length] } as Result : undefined
-  }
+  const items: Item[] = ready.map(p => ({ tx: p.tx!, owners: p.state?.owners, threshold: p.state?.threshold }))
+  const except = exceptions(items)
   const mode = (m: Draft['mode'], label: string) => html`<button class=${S.d.mode === m ? 'seg on' : 'seg'} aria-pressed=${S.d.mode === m} @click=${() => { S.d.mode = m; edited() }}>${label}</button>`
   const n = selected().length
   return html`
@@ -666,25 +768,28 @@ function composeView() {
       ${attention.length ? html` · <span class="bad">${attention.length} need${attention.length === 1 ? 's' : ''} attention</span>` : nothing}
       ${loading.length ? html` · <span class="muted">${loading.length} checking…</span>` : nothing}
     </div>
-    ${ready.length ? changeView(ready.map(p => p.tx!), prepResult, labels) : nothing}
+    ${ready.length ? reviewView(items, labels) : nothing}
     <div class="scroll"><table class="list"><tbody>${S.prepared.map(p => {
       const k = prepKind(p), notes = p.notes.filter(x => x !== 'checking the queue…')
+      const only = p.tx ? except(ready.indexOf(p)) : ''
       return html`<tr>
         <td class="ico-cell">${k === 'ready' ? html`<span class="ico todo" title="Needs signatures"></span>` : k === 'synced' ? html`<span class="ico idle" title="Already in sync">–</span>` : k === 'attention' ? html`<span class="ico warn" title="Needs attention">!</span>` : html`<span class="ico now"></span>`}</td>
         <td>${chainChip(p.chainId)}</td>
         <td>${addr(p.safe, labels)}</td>
         <td class="grow-cell small">
           ${p.error ? html`<span class="bad">${p.error}</span>` : p.skip ? html`<span class="muted">${p.skip}</span>` : nothing}
+          ${only ? html`<span>${only}</span>` : nothing}
           ${p.sim && !p.sim.ok && !p.sim.definite ? html`<span class="warn">${p.sim.error}</span>` : nothing}
           ${notes.length ? html`<span class=${notes.some(x => x.startsWith('⚠')) ? 'warn' : 'muted'}>${notes.join('; ')}</span>` : nothing}
         </td>
       </tr>`
     })}</tbody></table></div>
-    ${S.link ? html`<div class="linkbox">
-      <input readonly aria-label="Signing link" .value=${live(S.link)} @focus=${(e: any) => e.target.select()}>
-      <button @click=${() => copy(S.link)}>Copy link</button>
-      <a class="button primary" href=${S.link}>Sign now</a>
-    </div>` : html`<div class="row"><span class="grow"></span><button class="primary" @click=${createLink} ?disabled=${S.preparing || !ready.length}>Create signing link</button></div>`}
+    <div class="row">
+      <span class="grow"></span>
+      ${S.link ? html`<a class="button" href=${S.link}>Sign now</a>` : nothing}
+      <button class="primary" @click=${copyLink} ?disabled=${S.preparing || !ready.length}>${S.copied ? 'Copied ✓' : 'Copy signing link'}</button>
+    </div>
+    ${S.link ? html`<input readonly class="mono small" aria-label="Signing link" .value=${live(S.link)} @focus=${(e: any) => e.target.select()}>` : nothing}
   </section>` : nothing}`
 }
 
@@ -701,19 +806,6 @@ function icon(r: Row, kind: Kind) {
 }
 const KIND_CLASS: Record<Kind, string> = { loading: 'muted', collecting: '', ready: 'good', waiting: 'muted', executed: 'good', blocked: 'bad', unknown: 'warn' }
 
-function rowResult(tx: Tx): Result | undefined {
-  const r = S.rows.find(r => r.tx === tx)
-  if (!r?.owners || r.threshold === undefined || !needsWork(r)) return
-  let n = r.owners.length, t = r.threshold
-  for (const st of describe(tx)) {
-    if (st.target !== 'self') continue
-    const a = Object.fromEntries(st.args)
-    if (st.fn === 'addOwnerWithThreshold') n++, t = Number(a._threshold)
-    if (st.fn === 'removeOwner') n--, t = Number(a._threshold)
-    if (st.fn === 'changeThreshold') t = Number(a._threshold)
-  }
-  return { before: [r.threshold, r.owners.length], after: [t, n] }
-}
 
 function progressView() {
   const yours = S.account ? S.rows.filter(r => mine(r) || canSign(r)) : []
@@ -764,6 +856,8 @@ function progressView() {
 function batchView() {
   if (S.loadError) return html`<section class="card"><div class="errors">${S.loadError}</div><button @click=${() => { location.hash = ''; S.mode = 'compose'; update() }}>New batch</button></section>`
   const b = S.batch!
+  const items: Item[] = S.rows.map(r => ({ tx: r.tx, owners: r.owners, threshold: r.threshold, done: status(r).kind === 'executed' }))
+  const except = exceptions(items)
   const manual = S.rows.filter(r => r.svc === 'none' && needsWork(r))
   const toShare = S.rows.reduce((n, r) => n + unshared(r).length, 0)
   return html`
@@ -773,7 +867,7 @@ function batchView() {
       <span class="fingerprint" title="Fingerprint of every transaction in this link. Confirm it with whoever sent it.">${S.id}</span>
       <button class="ghost" @click=${edit}>Edit</button>
     </div>
-    ${changeView(b.txs, rowResult, b.labels)}
+    ${reviewView(items, b.labels)}
   </section>
 
   <section class="card sticky">${progressView()}</section>
@@ -790,6 +884,7 @@ function batchView() {
         <td>${addr(r.tx.safe)}</td>
         <td class="grow-cell">
           <span class=${KIND_CLASS[st.kind]}>${r === S.current && r.phase ? r.phase : st.text}</span>
+          ${except(S.rows.indexOf(r)) ? html`<div class="small">${except(S.rows.indexOf(r))}</div>` : nothing}
           ${conflict ? html`<div class="small warn">⚠ competes with another transaction at nonce ${r.tx.nonce}</div>` : nothing}
           ${r.error && st.kind !== 'unknown' ? html`<div class="small bad">${r.error}</div>` : nothing}
         </td>
