@@ -6,6 +6,7 @@
     "build": "bun scripts/build.ts",
     "dev": "bun scripts/build.ts --serve",
     "sandbox": "bun scripts/build.ts && bun test/sandbox.ts",
+    "sandbox:simple": "bun scripts/build.ts && bun test/sandbox.ts --simple",
     "test": "bun test"
   },
   "dependencies": {

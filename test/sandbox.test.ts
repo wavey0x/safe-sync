@@ -140,3 +140,23 @@ test.skipIf(!enabled)('Safe service rules the client depends on', async () => {
     expect(await Promise.all(Array.from({ length: 6 }, () => svc.getTx(8453, safeTxHash(tx))))).toEqual(Array(6).fill(null))
   } finally { svc.config.service[8453] = sb.service.url(8453); slow.stop() }
 }, 60_000)
+
+test.skipIf(!enabled)('simple mode: the two well-known test wallets run a 2-of-2 Safe on three local chains', async () => {
+  const simple = await startSandbox({ simple: true, basePort: 8901, rps: 1000 })
+  try {
+    for (const id of simple.serviceChains) svc.config.service[id] = simple.service.url(id)
+    const [a0, a1] = ACCOUNTS
+    expect(simple.owners).toEqual([a0.address, a1.address])
+    const t = parseTargets(simple.targets), a = parseActions(simple.actions)
+    const ready = await Promise.all(t.targets.map(x => prepareTarget(x, a.actions, {})))
+    expect(ready.map(p => [p.chainId, p.error, p.sim?.ok, p.threshold, p.owners?.length])).toEqual([[31338, undefined, true, 2, 4], [31339, undefined, true, 2, 4], [31340, undefined, true, 2, 4]])
+    for (const p of ready) {
+      for (const owner of [a0, a1]) await svc.submit(p.tx!, p.hash!, owner.address, await sign(p.tx!, owner), !!(await svc.getTx(p.chainId, p.hash!)))
+      const s = (await svc.getTx(p.chainId, p.hash!))!
+      const w = createWalletClient({ account: a1, transport: http(config.rpc[p.chainId]) }).extend(publicActions)
+      const rc = await w.waitForTransactionReceipt({ hash: await w.sendTransaction({ to: p.safe, data: execData(p.tx!, s.confirmations.map(c => ({ owner: c.owner, sig: c.signature })), 2), chain: null }) })
+      expect(rc.status).toBe('success')
+      expect((await readSafe(p.chainId, p.safe)).owners).toHaveLength(4)
+    }
+  } finally { simple.stop() }
+}, 60_000)
