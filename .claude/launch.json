@@ -1,6 +1,23 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "fanout", "runtimeExecutable": "bun", "runtimeArgs": ["scripts/build.ts", "--serve"], "port": 5173 }
+    {
+      "name": "fanout",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": [
+        "scripts/build.ts",
+        "--serve"
+      ],
+      "port": 5173
+    },
+    {
+      "name": "sandbox",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": [
+        "run",
+        "sandbox"
+      ],
+      "port": 8600
+    }
   ]
 }

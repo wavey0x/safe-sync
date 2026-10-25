@@ -198,15 +198,29 @@ function fromTxBuilder(j: any): Action[] {
 /** Replace a Safe's own address inside hex calldata with {self} so the payload can be replicated. */
 export const withSelf = (data: string, safe?: string) => safe ? data.replace(new RegExp(safe.replace(/^0x/i, ''), 'ig'), '{self}') : data
 
-/** Converts a source Safe transaction (as returned by the Transaction Service) into action lines. */
+/**
+ * Converts a source Safe transaction (as returned by the Transaction Service) into action lines.
+ * Owner changes on the Safe itself become swap/add/remove/threshold, so prevOwner is rebuilt per target.
+ * Anything whose meaning a plain call line cannot carry (DELEGATECALL) is refused.
+ */
 export function linesFromTx(t: { safe: string; to: string; value: string; data: string | null; operation: number }): string {
-  const self = (a: string) => (a.toLowerCase() === t.safe.toLowerCase() ? 'self' : a)
-  const line = (c: { to: string; value: bigint | string; data: string }) =>
-    [self(c.to), BigInt(c.value) ? `value=${c.value}` : '', c.data && c.data !== '0x' ? withSelf(c.data, t.safe) : ''].filter(Boolean).join(' ')
+  const line = (c: { to: string; value: bigint | string; data: string; operation: number }) => {
+    if (c.operation !== 0) throw new Error('Source contains a DELEGATECALL; it cannot be replicated safely, so build it manually')
+    if (same(c.to, t.safe) && !BigInt(c.value) && c.data && c.data !== '0x') {
+      try {
+        const { functionName, args } = decodeFunctionData({ abi: SAFE_ABI, data: c.data as Hex }) as { functionName: string; args: readonly any[] }
+        if (functionName === 'swapOwner') return `swap ${args[1]} ${args[2]}`
+        if (functionName === 'addOwnerWithThreshold') return `add ${args[0]}\nthreshold ${args[1]}`
+        if (functionName === 'removeOwner') return `remove ${args[1]}\nthreshold ${args[2]}`
+        if (functionName === 'changeThreshold') return `threshold ${args[0]}`
+      } catch {}
+    }
+    const to = same(c.to, t.safe) ? 'self' : c.to
+    return [to, BigInt(c.value) ? `value=${c.value}` : '', c.data && c.data !== '0x' ? withSelf(c.data, t.safe) : ''].filter(Boolean).join(' ')
+  }
   const data = (t.data ?? '0x') as Hex
   if (t.operation === 1 && MULTISEND_SET.has(t.to.toLowerCase())) return unpackMultiSend(data).map(line).join('\n')
-  if (t.operation !== 0) throw new Error('Source uses DELEGATECALL to an unknown contract; replicate it manually')
-  return line({ to: t.to, value: t.value, data })
+  return line({ to: t.to, value: t.value, data, operation: t.operation })
 }
 
 /** ENS names are resolved once, on Ethereum, when preparing; the batch stores addresses only. */
@@ -270,7 +284,7 @@ export function buildCalls(actions: Action[], safe: Address, state: SafeState, n
       owners.splice(i, 1)
     } else if (a.kind === 'threshold') {
       if (a.n < 1 || a.n > owners.length) throw new Error(`Threshold ${a.n} is invalid for ${owners.length} owners`)
-      if (a.n === threshold) { notes.push(`threshold already ${a.n}`); continue }
+      if (a.n === threshold) continue
       self(encodeFunctionData({ abi: SAFE_ABI, functionName: 'changeThreshold', args: [BigInt(a.n)] }))
       threshold = a.n
     } else {
@@ -419,13 +433,15 @@ export function normalizeSig(sig: Hex): Hex {
   return v < 27 ? (sig.slice(0, -2) + (v + 27).toString(16)) as Hex : sig
 }
 
-/** Recovers who produced a Safe signature: ECDSA (v 27/28), eth_sign (v 31/32), pre-approved hash (v 1). */
+/**
+ * Recovers who produced a Safe signature: ECDSA (v 27/28) or eth_sign (v 31/32).
+ * Pre-approved hashes (v 1) and contract signatures (v 0) prove nothing by themselves, so they don't count.
+ */
 export async function sigOwner(hash: Hex, sig: Hex): Promise<Address | undefined> {
   const v = parseInt(sig.slice(-2), 16)
   if (v === 27 || v === 28) return recoverAddress({ hash, signature: sig })
   if (v === 31 || v === 32) return recoverAddress({ hash: hashMessage({ raw: hash }), signature: (sig.slice(0, -2) + (v - 4).toString(16)) as Hex })
-  if (v === 1) return getAddress(slice(sig, 12, 32))
-  return undefined // contract signatures (v 0) are not supported
+  return undefined
 }
 
 /** Safe requires signatures sorted by owner address, ascending. Uses exactly `threshold` of them. */

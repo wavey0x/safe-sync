@@ -4,7 +4,7 @@
 import type { Address, Hex } from 'viem'
 import { chainOf, ZERO, type Tx } from './safe'
 
-export const config = { service: {} as Record<number, string>, apiKey: '' }
+export const config = { service: {} as Record<number, string>, apiKey: '', gapMs: 1000 }
 
 export function serviceUrl(chainId: number): string | undefined {
   if (config.service[chainId]) return config.service[chainId].replace(/\/+$/, '').replace(/\/api$/, '')
@@ -12,13 +12,13 @@ export function serviceUrl(chainId: number): string | undefined {
   return c?.service ? `https://api.safe.global/tx-service/${c.short}` : undefined
 }
 
-// Unauthenticated: 2 req/s per IP. Free API key: 5 req/s per account.
+// Safe allows 2 req/s per IP without a key, 5 req/s per account with one, but teammates behind one
+// network or sharing one key share that budget. So each browser stays at 1 req/s (gapMs) and backs off on 429.
 let last = 0, queue: Promise<unknown> = Promise.resolve()
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 function slot(): Promise<void> {
   const next = queue.then(async () => {
-    const gap = config.apiKey ? 220 : 550
-    await sleep(Math.max(0, last + gap - Date.now()))
+    await sleep(Math.max(0, last + config.gapMs - Date.now()))
     last = Date.now()
   })
   queue = next

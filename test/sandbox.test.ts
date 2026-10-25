@@ -1,0 +1,142 @@
+// End to end on the sandbox (14 local chains + mock Safe service): prepare, five owners sign through the
+// service, execute everywhere. Plus the Safe service rules the client depends on. Needs anvil.
+import { afterAll, beforeAll, expect, test } from 'bun:test'
+import { createWalletClient, encodeFunctionData, http, parseAbi, publicActions, type Address, type Hex } from 'viem'
+import {
+  config, execData, normalizeSig, parseActions, parseTargets, payloadKey, prepareTarget, readSafe, safeTxHash, sigOwner,
+  walletTypedData, type Prepared, type Tx,
+} from '../src/safe'
+import * as svc from '../src/service'
+import { startMockService } from './mock-service'
+import { ACCOUNTS, CHAIN_IDS, INCOMING, OWNERS, startSandbox, type Sandbox } from './sandbox'
+
+const enabled = !!Bun.which('anvil')
+let sb: Sandbox
+let prepared: Prepared[]
+
+beforeAll(async () => {
+  if (!enabled) return
+  // The client's 1 req/s pacing is a production setting; tests run the mock unthrottled to stay fast.
+  sb = await startSandbox({ basePort: 8801, rps: 1000 })
+  for (const id of sb.serviceChains) svc.config.service[id] = sb.service.url(id)
+  svc.config.gapMs = 0
+}, 120_000)
+afterAll(() => sb?.stop())
+
+const sign = async (tx: Tx, signer: (typeof OWNERS)[number]) => {
+  const p = JSON.parse(walletTypedData(tx)); delete p.types.EIP712Domain
+  return normalizeSig(await signer.signTypedData(p))
+}
+const post = (chainId: number, path: string, body: unknown) =>
+  fetch(`${sb.service.url(chainId)}/api${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+const proposal = async (tx: Tx, sender: string, signature: Hex | null, over: Record<string, unknown> = {}) => ({
+  to: tx.to, value: tx.value, data: tx.data, operation: tx.operation, safeTxGas: '0', baseGas: '0', gasPrice: '0',
+  gasToken: '0x0000000000000000000000000000000000000000', refundReceiver: '0x0000000000000000000000000000000000000000',
+  nonce: String(tx.nonce), contractTransactionHash: safeTxHash(tx), sender, signature, ...over,
+})
+
+test.skipIf(!enabled)('prepare sorts the 16 Safes into ready and already applied, and spots queued transactions', async () => {
+  const t = parseTargets(sb.targets), a = parseActions(sb.actions)
+  expect([...t.errors, ...a.errors]).toEqual([])
+  expect(t.targets).toHaveLength(16)
+  prepared = await Promise.all(t.targets.map(x => prepareTarget(x, a.actions, {})))
+  const linea = prepared.find(p => p.chainId === 59144)!
+  expect(linea.skip).toBe('Nothing to do')
+  const ready = prepared.filter(p => p.tx && !p.error && !p.skip)
+  expect(ready).toHaveLength(15)
+  for (const p of ready) {
+    expect(p.sim?.ok).toBe(true)
+    expect(p.owners).toContain(INCOMING[0].address)
+    expect(p.threshold).toBe(5)
+  }
+  // Nonces as set up: Optimism and Sonic at 1, Arbitrum at 2, the original Safe at 3.
+  const nonce = (id: number, safe = sb.team) => ready.find(p => p.chainId === id && p.safe === safe)!.tx!.nonce
+  expect([nonce(10), nonce(146), nonce(42161), nonce(1, sb.original), nonce(8453)]).toEqual([1, 1, 2, 3, 0])
+  // Owner order differs on the original Safe, so its prevOwner differs: two encodings of one change.
+  // (Scroll's Safe has its own address but the same owner order, so its payload matches up to that address.)
+  expect(new Set(ready.map(p => payloadKey(p.tx!))).size).toBe(2)
+  const orig = (await svc.getTx(1, ready.find(p => p.safe === sb.original)!.hash!))!
+  expect(orig.confirmations.map(c => c.owner)).toEqual([OWNERS[1].address])
+  const queued = await svc.queued(100, sb.team, 0)
+  expect(queued.some(q => q.safeTxHash !== ready.find(p => p.chainId === 100)!.hash)).toBe(true)
+}, 60_000)
+
+test.skipIf(!enabled)('five owners sign everything through the service, then one executor runs it on every chain', async () => {
+  const ready = prepared.filter(p => p.tx && !p.error && !p.skip)
+  const offline = new Map<string, { owner: Address; sig: Hex }[]>()
+  for (const owner of OWNERS.slice(0, 5)) {
+    for (const p of ready) {
+      const tx = p.tx!, hash = p.hash!
+      if (sb.noServiceChains.includes(tx.chainId)) { offline.set(hash, [...(offline.get(hash) ?? []), { owner: owner.address, sig: await sign(tx, owner) }]); continue }
+      const existing = await svc.getTx(tx.chainId, hash)
+      if (existing?.confirmations.some(c => c.owner === owner.address)) continue
+      if (existing && existing.confirmations.length >= 5) continue
+      await svc.submit(tx, hash, owner.address, await sign(tx, owner), !!existing)
+    }
+  }
+  const executor = ACCOUNTS[0]
+  for (const p of ready) {
+    const tx = p.tx!, hash = p.hash!
+    let sigs = offline.get(hash)
+    if (!sigs) {
+      const s = (await svc.getTx(tx.chainId, hash))!
+      expect(s.confirmations.length).toBeGreaterThanOrEqual(5)
+      sigs = s.confirmations.map(c => ({ owner: c.owner, sig: c.signature }))
+    }
+    for (const s of sigs) expect(await sigOwner(hash, s.sig)).toBe(s.owner)
+    const w = createWalletClient({ account: executor, transport: http(config.rpc[tx.chainId]) }).extend(publicActions)
+    const rc = await w.waitForTransactionReceipt({ hash: await w.sendTransaction({ to: tx.safe, data: execData(tx, sigs, 5), chain: null }) })
+    expect(rc.status).toBe('success')
+    const after = await readSafe(tx.chainId, tx.safe)
+    expect(after.owners).toContain(INCOMING[1].address)
+    expect(after.owners).not.toContain(OWNERS[0].address)
+    expect(after.nonce).toBe(tx.nonce + 1)
+    if (!sb.noServiceChains.includes(tx.chainId)) expect((await svc.getTx(tx.chainId, hash))!.isExecuted).toBe(true)
+  }
+  expect(new Set(ready.map(p => p.chainId)).size).toBe(CHAIN_IDS.length - 1) // every chain except Linea, already done
+}, 180_000)
+
+test.skipIf(!enabled)('Safe service rules the client depends on', async () => {
+  const owner = OWNERS[5], other = OWNERS[6]
+  const tx: Tx = { chainId: 8453, safe: sb.team, nonce: 1, to: sb.team, value: '0', data: encodeFunctionData({ abi: parseAbi(['function changeThreshold(uint256)']), functionName: 'changeThreshold', args: [4n] }), operation: 0 }
+  const sig = await sign(tx, owner), path = `/v2/safes/${tx.safe}/multisig-transactions/`
+  const expect422 = async (body: unknown, text: string, p = path) => {
+    const res = await post(8453, p, body)
+    expect(res.status).toBe(422)
+    expect(await res.text()).toContain(text)
+  }
+  // Addresses must be checksummed: wallets often return lowercase accounts.
+  await expect422(await proposal(tx, owner.address.toLowerCase(), sig), 'is not checksumed')
+  await expect422(await proposal(tx, owner.address, sig), 'Checksum address validation failed', `/v2/safes/${tx.safe.toLowerCase()}/multisig-transactions/`)
+  await expect422(await proposal(tx, owner.address, sig, { contractTransactionHash: `0x${'ab'.repeat(32)}` }), 'does not match provided contract-tx-hash')
+  await expect422(await proposal(tx, ACCOUNTS[0].address, sig), 'is not an owner or delegate')
+  await expect422(await proposal(tx, other.address, sig), 'Signature does not match sender')
+  // v = 0/1 from some wallets means "contract signature" / "approved hash" to Safe: normalising matters.
+  await expect422(await proposal(tx, owner.address, (sig.slice(0, -2) + (parseInt(sig.slice(-2), 16) - 27).toString(16).padStart(2, '0')) as Hex), 'is not valid')
+  // DELEGATECALL only to trusted libraries.
+  await expect422(await proposal({ ...tx, operation: 1, to: ACCOUNTS[0].address }, owner.address, null), 'Operation DELEGATE_CALL is not allowed')
+
+  // Proposing is get-or-create: proposing an existing transaction with another owner's signature adds a confirmation.
+  expect((await post(8453, path, await proposal(tx, owner.address, sig))).status).toBe(201)
+  expect((await post(8453, path, await proposal(tx, other.address, await sign(tx, other)))).status).toBe(201)
+  expect((await svc.getTx(8453, safeTxHash(tx)))!.confirmations.map(c => c.owner)).toEqual([owner.address, other.address])
+  // Confirmations: unknown hash is 404, a non-owner is 400.
+  expect((await post(8453, `/v1/multisig-transactions/0x${'12'.repeat(32)}/confirmations/`, { signature: sig })).status).toBe(404)
+  const res = await post(8453, `/v1/multisig-transactions/${safeTxHash(tx)}/confirmations/`, { signature: await sign(tx, ACCOUNTS[0]) })
+  expect(res.status).toBe(400)
+  expect(await res.text()).toContain('is not an owner')
+  // Numbers come back as strings.
+  const got = (await svc.getTx(8453, safeTxHash(tx)))!
+  expect([typeof got.nonce, typeof got.value]).toEqual(['string', 'string'])
+
+  // Throttling, on a mock with the public API's 2 req/s: bursts get 429 with Retry-After,
+  // and the client (even unpaced) retries through them.
+  const slow = startMockService({ rps: 2, rpc: sb.rpc })
+  try {
+    const url = `${slow.url(8453)}/api/v2/multisig-transactions/${safeTxHash(tx)}/`
+    const burst = await Promise.all(Array.from({ length: 6 }, () => fetch(url)))
+    expect(burst.find(r => r.status === 429)?.headers.get('retry-after')).toBe('1')
+    svc.config.service[8453] = slow.url(8453)
+    expect(await Promise.all(Array.from({ length: 6 }, () => svc.getTx(8453, safeTxHash(tx))))).toEqual(Array(6).fill(null))
+  } finally { svc.config.service[8453] = sb.service.url(8453); slow.stop() }
+}, 60_000)

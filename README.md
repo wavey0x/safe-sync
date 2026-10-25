@@ -2,81 +2,95 @@
 
 One change, many Safes, one signing pass.
 
-Fanout replicates one administrative change (rotate signers, change threshold, any call) across
-many Safes on many chains, then lets every signer sign all of them in one sitting and anyone
-execute all of them in one more. It is a single static HTML file: no server, no database, no
-accounts.
+Rotating signers (or making any other change) on a Safe that lives on 25 chains normally means 25
+proposals, and then every signer clicks through 25 Safe{Wallet} screens. Fanout builds all of them
+from one description, gives the team one link, and walks each signer through every signature in a
+single sitting. It is one static HTML file: no server, no database, no accounts.
 
 ## Use it
 
-**Proposer**
-1. Paste the Safes, one per line: `eth:0xSafe`, a Safe{Wallet} link, or `0xSafe eth arb1 base 252`.
-2. Write the change, one action per line:
-   ```
-   swap 0xOldOwner… winthorpe.eth      # also: 0xOld -> 0xNew
-   add 0xNewOwner…
-   remove 0xLeavingOwner…
-   threshold 4
-   0xToken… transfer(address,uint256) 0xTo… 1000000
-   self 0x<raw calldata, may contain {self}>
-   ```
-   `swap/add/remove/threshold` are computed per Safe, because `prevOwner` depends on each Safe's
-   owner order. `self` is each target Safe. You can also paste a Transaction Builder JSON, or
-   import a queued Safe{Wallet} transaction by its link.
-3. **Prepare.** Every Safe is read, built, simulated from its own context, and its hash checked
-   against the Safe contract. Review the grouped actions and the table.
-4. **Create signing link** and post it in the team chat.
+**Proposer**: paste the Safes and the change, click **Prepare**, review, click **Create signing link**.
 
-**Signers**: open the link → compare the fingerprint with the proposer → Connect wallet → **Sign N**.
-Requests arrive back to back; confirm each on the device. Signatures go straight to the Safe
-Transaction Service, so they also show in Safe{Wallet}. The first signature on a transaction
-creates the proposal.
+```text
+# Safes: chain:0xSafe, a Safe{Wallet} link, or one address followed by chains
+0x6d447e544D01a59cb0774763bf15526574CffFeD eth oeth bnb gno pol base arb1 avax frax taiko
+eth:0x467947EE34aF926cF1DCac093870f613C96B1E0c
 
-**Executor** (anyone with gas on each chain): open the link → **Execute N**.
+# Change: owner changes are worked out per Safe, because prevOwner depends on each Safe's owner order
+swap 0x99BC02c239025E431D5741cC1DbA8CE77fc51CE3 winthorpe.eth
+swap 0xe9A65fe8190fA5A4b5E277b84f0aAce686FDc174 0x4046B37Ffc36B0C723d7Fc64e0C763B698D81934
+# also: add 0x…   remove 0x…   threshold 4   0xToken… transfer(address,uint256) 0xTo… 1000   self 0x<calldata>
+```
+
+You can also paste a Transaction Builder JSON, or import a transaction already queued in Safe{Wallet}
+by its link. Owner changes in it become `swap`/`add`/`remove`/`threshold` lines, and anything that
+can't be replicated safely (an inner DELEGATECALL) is refused.
+
+Prepare reads every Safe and builds its transaction. It simulates the transaction from the Safe's
+own context and checks the hash against the Safe contract. Results come back in three groups: ready,
+already applied, or needs attention. The review states the change in plain words ("Replace 0x99BC…
+→ winthorpe.eth · Threshold stays 5-of-9"). Exact calldata and prevOwner values sit behind
+*Technical details*. Editing the input throws the results away, so a link never carries stale
+transactions.
+
+**Signers**: open the link, compare the fingerprint with the proposer's, connect, click **Sign remaining N**.
+Every Safe is listed. The one being signed is highlighted, with its safeTxHash, domain hash and
+message hash to compare against the device. Each one turns into a green check as it completes. Pause
+and account switches stop before the next request. Safes that already have enough signatures are
+skipped. "You've signed all N" is shown separately from "Executed N of M".
+
+**Executor**: anyone with gas opens the link and clicks **Execute N**.
 
 ## How it works
 
 | Concern | Where it lives |
 |---|---|
-| What to sign | The link fragment: compressed JSON, each distinct payload stored once with the Safe's own address as `{self}`. 27 Safes fit in about 1 KB. Never sent to a server. |
-| Signatures | Safe Transaction Service, posted directly from the browser (CORS is open; no key needed). Chains without a service: a copy/paste signature bundle. |
-| Owners, threshold, nonce, executed? | The chain, read through public RPCs (two per chain with failover; override in Settings). |
-| Resume / retry | localStorage. On every open the service is re-read; any signature it doesn't have is re-posted. |
+| What to sign | The link fragment: compressed JSON that stores each distinct payload once, with the Safe's own address as `{self}`. 27 Safes fit in about 1 KB, and the fragment is never sent to a server. |
+| Signatures | Safe Transaction Service, posted straight from the browser, so they also show in Safe{Wallet}. The first signature on a transaction creates the proposal. Chains without a service use a copy/paste signature bundle. |
+| Owners, threshold, nonce, executed? | The chain, through public RPCs (two per chain with failover; override them in Settings). |
+| Resume / retry | localStorage, keyed by safeTxHash. Every open re-reads the service and re-uploads anything it lacks. Signatures survive editing a batch into a new link. |
 
-Checks before anyone signs: Safe version (1.3.0, 1.4.1, 1.5.0), `simulateAndRevert` of the exact
-payload, local EIP-712 hash equal to the Safe's own `getTransactionHash`, conflicts with queued
-transactions. Before each signature: a fresh nonce read, so nothing executed meanwhile is signed.
-After each signature: recovery must equal the connected account. Before execution: an `eth_call`
-of the full `execTransaction`.
+Safe service calls stay at 1 request/second per browser and back off on 429. The public limits are
+2/s per IP, or 5/s per account with a key, and teammates behind one network or one key share them.
 
-Gas and refund fields are always zero (the executor pays gas). Multiple calls use
-MultiSendCallOnly 1.3.0, the same contract Safe{Wallet}'s Transaction Builder uses, so a payload
-built here hashes identically to one built there.
+Only ECDSA and eth_sign signatures count toward quorum. Approved-hash and contract signatures prove
+nothing off-chain. Gas and refund fields are always zero, so the executor pays gas.
 
-## Verify what you sign
+## Try it locally: the sandbox
 
-- The fingerprint (e.g. `248c-e726`) covers every safeTxHash in the batch. Confirm it out of band.
-- While signing, the current transaction's safeTxHash, domain hash and message hash are shown, so
-  you can compare them with the device screen (Ledger blind signing shows domain + message hash).
-- Host `dist/fanout.html` yourself and publish its sha256 (printed by the build) so signers can
-  check they run the same file.
+```bash
+bun run sandbox      # needs anvil (Foundry)
+```
+
+The sandbox opens http://localhost:8600 with everything wired to local stand-ins:
+
+- **14 chains:** anvil instances with real chain ids. 12 of them have a Safe service; Fraxtal and Taiko don't.
+- **Real contracts:** the canonical Safe 1.3.0 and 1.4.1 contracts, at their canonical addresses, copied from Ethereum into `test/fixtures`.
+- **Safes:** a 5-of-9 team Safe at the same address on every chain, the "original" Safe on Ethereum with a different owner order, and a 1.4.1 Safe on Scroll.
+- **The awkward cases:** different nonces, a rotation already done on Linea, a conflicting transaction queued on Gnosis, and the same rotation already queued with one signature.
+- **A mock Safe Transaction Service** (`test/mock-service.ts`). It follows the real service's source (v6.13.0 at `83316729`, safe-eth-py 7.27.0): checksummed addresses only, hash check, sender must be an owner and one of the signers, re-proposing adds confirmations, DELEGATECALL only to MultiSend libraries, 422 vs 400 vs 404 bodies, strings for numbers, executions indexed from the chain, and 2 req/s throttling.
+- **A sandbox wallet** (bottom-left) that signs as any owner and behaves like MetaMask: lowercase accounts, chainId must match, an optional rejection.
+
+The draft is pre-filled: Prepare → Create signing link → Open to sign, then switch signers in the
+sandbox wallet.
 
 ## Develop
 
 ```bash
 bun install
-bun test                         # unit tests; fork tests too if anvil + ETHEREUM_RPC_URL + ARBITRUM_RPC_URL are set
-bun run build                    # dist/fanout.html + sha256
+bun test                         # unit tests + sandbox end-to-end (needs anvil); live ENS check with ETHEREUM_RPC_URL
+bun run build                    # dist/fanout.html + its sha256: host it anywhere static, publish the hash
 bun run dev                      # build and serve on http://localhost:5173
-bun scripts/validate-example.ts  # read-only check of the 27-Safe rotation example on live chains
+bun scripts/validate-example.ts  # read-only check of the 27-Safe Curve rotation against live chains
 bun scripts/pick-rpcs.ts         # refresh src/chains.ts with CORS-capable public RPCs
 ```
 
-`src/safe.ts` is the core (parsing, building, hashing, simulation, signatures, link format),
-`src/service.ts` the throttled Safe Transaction Service client, and `src/app.ts` the UI (lit-html).
+`src/safe.ts` holds the core (parsing, per-Safe building, hashing, simulation, signatures, link
+format). `src/service.ts` is the Safe service client and `src/app.ts` the UI (lit-html). Wallet
+extensions don't inject into `file://` pages, so serve the file rather than opening it directly.
 
-## Not supported (on purpose)
+## Not supported, on purpose
 
-Safe < 1.3.0; contract owners (EIP-1271 signatures); WalletConnect and direct Ledger/Trezor USB
-(use the device through Rabby, MetaMask or Frame); non-zero gas/refund fields; automatic nonce
-juggling beyond "queue after pending transactions".
+Safe < 1.3.0; contract owners (EIP-1271); WalletConnect; direct USB to hardware wallets (use the
+device through Rabby, MetaMask or Frame); non-zero gas or refund fields; nonce juggling beyond
+"queue after pending transactions".

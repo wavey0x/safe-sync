@@ -33,10 +33,11 @@ test('wallet typed-data payload hashes to the same safeTxHash and recovers the s
   // v = 0/1 (some hardware paths) is normalised to 27/28
   const low = (sig.slice(0, -2) + (parseInt(sig.slice(-2), 16) - 27).toString(16).padStart(2, '0')) as Hex
   expect(normalizeSig(low)).toBe(sig)
-  // eth_sign style (v + 4) and approved-hash (v = 1) signatures are recognised too
+  // eth_sign style (v + 4) signatures are recognised too
   const ethSign = await acct.signMessage({ message: { raw: safeTxHash(EXAMPLE) } })
   expect(await sigOwner(safeTxHash(EXAMPLE), (ethSign.slice(0, -2) + (parseInt(ethSign.slice(-2), 16) + 4).toString(16)) as Hex)).toBe(acct.address)
-  expect(await sigOwner(safeTxHash(EXAMPLE), `0x${acct.address.slice(2).padStart(64, '0')}${'0'.repeat(64)}01`)).toBe(acct.address)
+  // An approved-hash marker (v = 1) proves nothing off-chain, so it never counts
+  expect(await sigOwner(safeTxHash(EXAMPLE), `0x${acct.address.slice(2).padStart(64, '0')}${'0'.repeat(64)}01`)).toBeUndefined()
 })
 
 test('prevOwner follows the owner list as it changes', () => {
@@ -85,12 +86,22 @@ test('calls: signatures with args, value, self and raw calldata with {self}', ()
   expect(parseActions('0xnope transfer(address) x').errors.length).toBe(1)
 })
 
-test('importing a source Safe tx turns its own address into self', () => {
+test('importing a source Safe tx rebuilds owner changes per Safe and refuses what it cannot carry', () => {
   const lines = linesFromTx({ safe: ORIGINAL, to: EXAMPLE.to, value: '0', data: DATA, operation: 1 })
-  expect(lines.split('\n')).toHaveLength(2)
-  expect(lines.startsWith('self 0xe318b52b')).toBe(true)
-  const { calls } = buildCalls(parseActions(lines).actions, ORIGINAL, { version: '1.3.0', owners: OWNERS, threshold: 5, nonce: 13 }, {})
-  expect(packMultiSend(calls)).toBe(DATA)
+  expect(lines).toBe('swap 0x99BC02c239025E431D5741cC1DbA8CE77fc51CE3 0xBd0a74e51729a4D0B92742e67183C4cBc97bCA92\nswap 0xe9A65fe8190fA5A4b5E277b84f0aAce686FDc174 0x4046B37Ffc36B0C723d7Fc64e0C763B698D81934')
+  // Same owners in another order: prevOwner is rebuilt for this Safe instead of copied from the source.
+  const reordered = [...OWNERS.slice(4), ...OWNERS.slice(0, 4)]
+  const { calls } = buildCalls(parseActions(lines).actions, ORIGINAL, { version: '1.3.0', owners: reordered, threshold: 5, nonce: 0 }, {})
+  // 0x99BC… is first in this Safe, so its prevOwner is the sentinel 0x…01 (it was 0xDAa0… in the source)
+  expect(unpackMultiSend(packMultiSend(calls))[0].data.startsWith(`0xe318b52b${'1'.padStart(64, '0')}`)).toBe(true)
+  // The same import on the original owner order reproduces the source exactly.
+  expect(packMultiSend(buildCalls(parseActions(lines).actions, ORIGINAL, { version: '1.3.0', owners: OWNERS, threshold: 5, nonce: 13 }, {}).calls)).toBe(DATA)
+  // Other calls keep their target, with the source Safe's own address as self.
+  expect(linesFromTx({ safe: ORIGINAL, to: '0x1111111111111111111111111111111111111111', value: '5', data: `0xabcdef00${ORIGINAL.slice(2)}`, operation: 0 }))
+    .toBe('0x1111111111111111111111111111111111111111 value=5 0xabcdef00{self}')
+  // A DELEGATECALL inside a MultiSend would silently become a CALL: refuse it.
+  const inner = packMultiSend([{ to: ORIGINAL, value: 0n, data: '0x12345678' }]).replace(/(0000000000000000000000000000000000000000000000000000000000000020[0-9a-f]{64})00/, '$101') as Hex
+  expect(() => linesFromTx({ safe: ORIGINAL, to: '0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526', value: '0', data: inner, operation: 1 })).toThrow('DELEGATECALL')
 })
 
 test('batch link round-trips and stores identical payloads once', async () => {
