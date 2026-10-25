@@ -13,7 +13,7 @@ import { CHAINS, type Chain } from './chains'
 export type Call = { to: Address; value: bigint; data: Hex }
 export type Tx = { chainId: number; safe: Address; nonce: number; to: Address; value: string; data: Hex; operation: 0 | 1 }
 export type Target = { chainId: number; safe: Address }
-export type Batch = { title: string; created: number; txs: Tx[]; labels: Record<string, string>; src: { targets: string; actions: string } }
+export type Batch = { title: string; created: number; txs: Tx[]; labels: Record<string, string>; src: unknown }
 
 export const ZERO = '0x0000000000000000000000000000000000000000' as Address
 const SENTINEL = '0x0000000000000000000000000000000000000001' as Address
@@ -118,6 +118,8 @@ export type Action =
   | { kind: 'remove'; owner: string }
   | { kind: 'threshold'; n: number }
   | { kind: 'call'; to: string; value: bigint; data?: string; fn?: AbiFunction; args?: string[] }
+  // Make the Safe have exactly these owners and this threshold; `replace` says which removal pairs with which addition.
+  | { kind: 'sync'; owners: string[]; threshold: number; replace: [string, string][] }
 
 /** Splits on whitespace, keeping [..] / (..) groups and "quoted strings" together. */
 function tokenize(line: string): string[] {
@@ -143,7 +145,7 @@ function tokenize(line: string): string[] {
 export function parseActions(text: string): { actions: Action[]; errors: string[] } {
   const actions: Action[] = [], errors: string[] = []
   if (text.trim().startsWith('{')) {
-    try { return { actions: fromTxBuilder(JSON.parse(text)), errors } } catch (e) { return { actions, errors: [`Transaction Builder JSON: ${msg(e)}`] } }
+    try { return parseActions(linesFromTxBuilder(JSON.parse(text))) } catch (e) { return { actions, errors: [`Transaction Builder JSON: ${msg(e)}`] } }
   }
   for (const raw of text.split('\n')) {
     const line = raw.replace(/#.*/, '').trim()
@@ -178,56 +180,55 @@ export function parseActions(text: string): { actions: Action[]; errors: string[
   return { actions, errors }
 }
 
-function fromTxBuilder(j: any): Action[] {
+/** Transaction Builder JSON → action lines, through the same conversion as a queued Safe transaction. */
+export function linesFromTxBuilder(j: any): string {
   if (!Array.isArray(j.transactions)) throw new Error('missing transactions[]')
-  const src = j.meta?.createdFromSafeAddress?.toLowerCase()
-  return j.transactions.map((t: any): Action => {
-    const value = BigInt(t.value || 0)
-    const to = src && t.to.toLowerCase() === src ? 'self' : t.to
-    if (t.data && t.data !== '0x') return { kind: 'call', to, value, data: withSelf(t.data, src) }
-    if (!t.contractMethod) return { kind: 'call', to, value, data: '0x' }
-    const fn = { type: 'function', name: t.contractMethod.name, inputs: t.contractMethod.inputs, outputs: [], stateMutability: 'nonpayable' } as AbiFunction
-    const args = fn.inputs.map(i => {
-      const v = t.contractInputsValues?.[i.name!] ?? ''
-      return src && typeof v === 'string' ? v.replace(new RegExp(src, 'ig'), 'self') : v
-    })
-    return { kind: 'call', to, value, fn, args }
-  })
+  const src: string | undefined = j.meta?.createdFromSafeAddress
+  return j.transactions.map((t: any) => {
+    let data: string = t.data && t.data !== '0x' ? t.data : '0x'
+    if (data === '0x' && t.contractMethod) {
+      const fn = { type: 'function', name: t.contractMethod.name, inputs: t.contractMethod.inputs, outputs: [], stateMutability: 'nonpayable' } as AbiFunction
+      data = encodeFunctionData({ abi: [fn], args: fn.inputs.map(i => coerce(i.type, t.contractInputsValues?.[i.name!] ?? '', getAddress)) })
+    }
+    return replicateLine({ to: t.to, value: String(t.value || 0), data, operation: 0 }, src)
+  }).join('\n')
 }
 
 /** Replace a Safe's own address inside hex calldata with {self} so the payload can be replicated. */
 export const withSelf = (data: string, safe?: string) => safe ? data.replace(new RegExp(safe.replace(/^0x/i, ''), 'ig'), '{self}') : data
 
 /**
- * Converts a source Safe transaction (as returned by the Transaction Service) into action lines.
- * Owner changes on the Safe itself become swap/add/remove/threshold, so prevOwner is rebuilt per target.
- * Anything whose meaning a plain call line cannot carry (DELEGATECALL) is refused.
+ * One call made by `source` → an action line any Safe can run. Owner changes on the source itself become
+ * swap/add/remove/threshold, so prevOwner is rebuilt per target; the source's own address becomes self.
+ * A DELEGATECALL can't be carried by a plain call line, so it is refused.
  */
-export function linesFromTx(t: { safe: string; to: string; value: string; data: string | null; operation: number }): string {
-  const line = (c: { to: string; value: bigint | string; data: string; operation: number }) => {
-    if (c.operation !== 0) throw new Error('Source contains a DELEGATECALL; it cannot be replicated safely, so build it manually')
-    if (same(c.to, t.safe) && !BigInt(c.value) && c.data && c.data !== '0x') {
-      try {
-        const { functionName, args } = decodeFunctionData({ abi: SAFE_ABI, data: c.data as Hex }) as { functionName: string; args: readonly any[] }
-        if (functionName === 'swapOwner') return `swap ${args[1]} ${args[2]}`
-        if (functionName === 'addOwnerWithThreshold') return `add ${args[0]}\nthreshold ${args[1]}`
-        if (functionName === 'removeOwner') return `remove ${args[1]}\nthreshold ${args[2]}`
-        if (functionName === 'changeThreshold') return `threshold ${args[0]}`
-      } catch {}
-    }
-    const to = same(c.to, t.safe) ? 'self' : c.to
-    return [to, BigInt(c.value) ? `value=${c.value}` : '', c.data && c.data !== '0x' ? withSelf(c.data, t.safe) : ''].filter(Boolean).join(' ')
+function replicateLine(c: { to: string; value: bigint | string; data: string; operation: number }, source?: string): string {
+  if (c.operation !== 0) throw new Error('Source contains a DELEGATECALL; it cannot be replicated safely, so build it manually')
+  if (source && same(c.to, source) && !BigInt(c.value) && c.data && c.data !== '0x') {
+    try {
+      const { functionName, args } = decodeFunctionData({ abi: SAFE_ABI, data: c.data as Hex }) as { functionName: string; args: readonly any[] }
+      if (functionName === 'swapOwner') return `swap ${args[1]} ${args[2]}`
+      if (functionName === 'addOwnerWithThreshold') return `add ${args[0]}\nthreshold ${args[1]}`
+      if (functionName === 'removeOwner') return `remove ${args[1]}\nthreshold ${args[2]}`
+      if (functionName === 'changeThreshold') return `threshold ${args[0]}`
+    } catch {}
   }
+  const to = source && same(c.to, source) ? 'self' : c.to
+  return [to, BigInt(c.value) ? `value=${c.value}` : '', c.data && c.data !== '0x' ? withSelf(c.data, source) : ''].filter(Boolean).join(' ')
+}
+
+/** A queued Safe transaction (as returned by the Transaction Service) → action lines. */
+export function linesFromTx(t: { safe: string; to: string; value: string; data: string | null; operation: number }): string {
   const data = (t.data ?? '0x') as Hex
-  if (t.operation === 1 && MULTISEND_SET.has(t.to.toLowerCase())) return unpackMultiSend(data).map(line).join('\n')
-  return line({ to: t.to, value: t.value, data, operation: t.operation })
+  if (t.operation === 1 && MULTISEND_SET.has(t.to.toLowerCase())) return unpackMultiSend(data).map(c => replicateLine(c, t.safe)).join('\n')
+  return replicateLine({ to: t.to, value: t.value, data, operation: t.operation }, t.safe)
 }
 
 /** ENS names are resolved once, on Ethereum, when preparing; the batch stores addresses only. */
 export async function resolveNames(actions: Action[]): Promise<Record<string, Address>> {
   const names = new Set<string>()
   for (const a of actions) {
-    for (const v of a.kind === 'swap' ? [a.old, a.new] : a.kind === 'add' || a.kind === 'remove' ? [a.owner] : a.kind === 'call' ? [a.to, ...(a.args ?? [])] : [])
+    for (const v of a.kind === 'swap' ? [a.old, a.new] : a.kind === 'add' || a.kind === 'remove' ? [a.owner] : a.kind === 'call' ? [a.to, ...(a.args ?? [])] : a.kind === 'sync' ? [...a.owners, ...a.replace.flat()] : [])
       if (isName(v)) names.add(v.toLowerCase())
   }
   const out: Record<string, Address> = {}
@@ -254,6 +255,20 @@ export async function readSafe(chainId: number, safe: Address): Promise<SafeStat
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
 
+const withTimeout = <T>(p: Promise<T>, ms: number) => Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timed out')), ms))])
+
+export type Found = { chainId: number; safe: Address; state?: SafeState; error?: string }
+
+/** Looks for a Safe at `safe` on every chain with an RPC. Chains without it are left out; unreachable ones come back with an error. */
+export async function findSafe(safe: Address, timeoutMs = 8000, chainIds?: number[]): Promise<Found[]> {
+  const ids = chainIds ?? [...new Set([...CHAINS.map(c => c.id), ...Object.keys(config.rpc).map(Number)])]
+  const found = await Promise.all(ids.map(async (chainId): Promise<Found | null> => {
+    try { return { chainId, safe, state: await withTimeout(readSafe(chainId, safe), timeoutMs) } } catch (e) { return notHere(e) ? null : { chainId, safe, error: msg(e) } }
+  }))
+  return found.filter((f): f is Found => !!f)
+}
+const notHere = (e: unknown) => /No contract|returned no data|reverted|is not a valid|out of gas/i.test(msg(e))
+
 /** Turns actions into calls for one Safe, tracking the owner list as it changes (prevOwner depends on order). */
 export function buildCalls(actions: Action[], safe: Address, state: SafeState, names: Record<string, Address>) {
   const addr = (s: string): Address => s === 'self' ? safe : isName(s) ? names[s.toLowerCase()] : getAddress(s)
@@ -262,31 +277,47 @@ export function buildCalls(actions: Action[], safe: Address, state: SafeState, n
   const self = (data: Hex) => calls.push({ to: safe, value: 0n, data })
   const prev = (i: number) => (i === 0 ? SENTINEL : owners[i - 1])
   const idx = (a: Address) => owners.findIndex(o => same(o, a))
-  for (const a of actions) {
+  const apply = (a: Action): void => {
     if (a.kind === 'swap') {
       const o = addr(a.old), n = addr(a.new), i = idx(o)
-      if (i < 0 && idx(n) >= 0) { notes.push(`${short(o)} → ${short(n)} already done`); continue }
+      if (i < 0 && idx(n) >= 0) return void notes.push(`${short(o)} → ${short(n)} already done`)
       if (i < 0) throw new Error(`${short(o)} is not an owner`)
       if (idx(n) >= 0) throw new Error(`${short(n)} is already an owner`)
       self(encodeFunctionData({ abi: SAFE_ABI, functionName: 'swapOwner', args: [prev(i), o, n] }))
       owners[i] = n
     } else if (a.kind === 'add') {
       const n = addr(a.owner)
-      if (idx(n) >= 0) { notes.push(`${short(n)} already an owner`); continue }
+      if (idx(n) >= 0) return void notes.push(`${short(n)} already an owner`)
       self(encodeFunctionData({ abi: SAFE_ABI, functionName: 'addOwnerWithThreshold', args: [n, BigInt(threshold)] }))
       owners = [n, ...owners]
     } else if (a.kind === 'remove') {
       const o = addr(a.owner), i = idx(o)
-      if (i < 0) { notes.push(`${short(o)} already not an owner`); continue }
+      if (i < 0) return void notes.push(`${short(o)} already not an owner`)
       if (owners.length === 1) throw new Error('Cannot remove the last owner')
       threshold = Math.min(threshold, owners.length - 1)
       self(encodeFunctionData({ abi: SAFE_ABI, functionName: 'removeOwner', args: [prev(i), o, BigInt(threshold)] }))
       owners.splice(i, 1)
     } else if (a.kind === 'threshold') {
       if (a.n < 1 || a.n > owners.length) throw new Error(`Threshold ${a.n} is invalid for ${owners.length} owners`)
-      if (a.n === threshold) continue
+      if (a.n === threshold) return
       self(encodeFunctionData({ abi: SAFE_ABI, functionName: 'changeThreshold', args: [BigInt(a.n)] }))
       threshold = a.n
+    } else if (a.kind === 'sync') {
+      // Compare this Safe with the target: drift is fixed and a Safe already in sync gets nothing.
+      const want = a.owners.map(addr)
+      if (!want.length) throw new Error('Keep at least one owner')
+      if (new Set(want.map(w => w.toLowerCase())).size !== want.length) throw new Error('The owner list has a duplicate')
+      const remove = owners.filter(o => !want.some(w => same(w, o))), add = want.filter(w => idx(w) < 0)
+      const pairs: [Address, Address][] = []
+      for (const [o, n] of a.replace.map(([o, n]) => [addr(o), addr(n)])) {
+        const i = remove.findIndex(r => same(r, o)), j = add.findIndex(x => same(x, n))
+        if (i >= 0 && j >= 0) pairs.push([remove.splice(i, 1)[0], add.splice(j, 1)[0]])
+      }
+      while (remove.length && add.length) pairs.push([remove.shift()!, add.shift()!])
+      for (const [o, n] of pairs) apply({ kind: 'swap', old: o, new: n })
+      for (const n of add) apply({ kind: 'add', owner: n }) // adds first, so removals never push the threshold above the owner count
+      for (const o of remove) apply({ kind: 'remove', owner: o })
+      apply({ kind: 'threshold', n: a.threshold })
     } else {
       const to = addr(a.to)
       let data: Hex
@@ -295,6 +326,7 @@ export function buildCalls(actions: Action[], safe: Address, state: SafeState, n
       calls.push({ to, value: a.value, data })
     }
   }
+  actions.forEach(apply)
   return { calls, owners, threshold, notes }
 }
 
@@ -351,7 +383,9 @@ export async function prepareTarget(t: Target, actions: Action[], names: Record<
     if (!VERSIONS.includes(state.version)) throw new Error(`Safe ${state.version} is not supported (1.3.0, 1.4.1, 1.5.0)`)
     const b = buildCalls(actions, t.safe, state, names)
     p.notes.push(...b.notes); p.owners = b.owners; p.threshold = b.threshold
-    if (!b.calls.length) { p.skip = 'Nothing to do'; return p }
+    if (!b.calls.length) { p.skip = 'Already in sync'; return p }
+    const missing = (await Promise.all(b.calls.filter(c => !same(c.to, t.safe) && c.data !== '0x').map(async c => ((await client(t.chainId).getCode({ address: c.to })) ?? '0x') === '0x' ? c.to : null))).filter(Boolean)
+    if (missing.length) throw new Error(`No contract at ${missing.map(a => short(a!)).join(', ')} on this chain`)
     const env = b.calls.length === 1
       ? { to: b.calls[0].to, value: b.calls[0].value, data: b.calls[0].data, operation: 0 as const }
       : { to: await firstDeployed(t.chainId, MULTISEND_CALL_ONLY), value: 0n, data: packMultiSend(b.calls), operation: 1 as const }
@@ -458,7 +492,7 @@ export function execData(tx: Tx, sigs: { owner: Address; sig: Hex }[], threshold
 
 // The link stores each distinct payload once, with the Safe's own address as {self},
 // so the same change on 30 Safes costs barely more than on one.
-type Packed = { v: 1; title: string; created: number; labels: Record<string, string>; src: Batch['src']; p: [string, string, string, number][]; t: [number, string, number, number][] }
+type Packed = { v: 1; title: string; created: number; labels: Record<string, string>; src: unknown; p: [string, string, string, number][]; t: [number, string, number, number][] }
 
 export async function encodeBatch(b: Batch): Promise<string> {
   const p: Packed['p'] = [], keys: string[] = []
@@ -489,7 +523,7 @@ export async function decodeBatch(s: string): Promise<Batch> {
     if (!/^0x([0-9a-f]{2})*$/i.test(d)) throw new Error('Bad calldata')
     return { chainId, safe: sa, nonce, to: to === 'self' ? sa : getAddress(to), value, data: d as Hex, operation }
   })
-  return { title: String(j.title ?? ''), created: Number(j.created), labels: j.labels ?? {}, src: j.src ?? { targets: '', actions: '' }, txs }
+  return { title: String(j.title ?? ''), created: Number(j.created), labels: j.labels ?? {}, src: j.src ?? null, txs }
 }
 
 /** Short fingerprint of exactly what will be signed — compare it out of band. */

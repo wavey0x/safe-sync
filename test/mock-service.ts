@@ -1,5 +1,5 @@
 // Stand-in for the Safe Transaction Service, for tests and the sandbox. It follows the real service's
-// source for the endpoints Fanout uses (safe-transaction-service v6.13.0 @ 83316729, safe-eth-py 7.27.0):
+// source for the endpoints Safe Sync uses (safe-transaction-service v6.13.0 @ 83316729, safe-eth-py 7.27.0):
 // same paths, field validation, status codes, error texts and response shapes. Proposals live in memory;
 // owners, versions, nonces, approvals and executions are read from the chain, as the real service does.
 import { createPublicClient, getAddress, hashMessage, http, keccak256, parseAbi, recoverAddress, size, slice, toHex, type Address, type Hex, type PublicClient } from 'viem'

@@ -1,14 +1,16 @@
-// Injected by `bun run sandbox` only (never part of dist/fanout.html): seeds the app's settings and draft
+// Injected by `bun run sandbox` only (never part of dist/safe-sync.html): seeds the app's settings and draft
 // for the local chains, and adds an EIP-6963 wallet that signs with the local test accounts.
+// In the full sandbox (real chain ids) it also hides other wallets: a real wallet would send executions
+// to the real networks. The simple sandbox uses local-only chain ids, so real wallets are fine there.
 // It behaves like MetaMask where it matters: lowercase accounts, chainId must match for typed data,
 // one confirmation per request (with a short delay), and rejections (code 4001).
 ;(() => {
   const cfg = window.__SANDBOX__
-  if (localStorage.getItem('fanout:sandbox-run') !== cfg.runId) {
-    for (const k of Object.keys(localStorage)) if (k.startsWith('fanout:')) localStorage.removeItem(k)
-    localStorage.setItem('fanout:settings', JSON.stringify(cfg.settings))
-    localStorage.setItem('fanout:draft', JSON.stringify(cfg.draft))
-    localStorage.setItem('fanout:sandbox-run', cfg.runId)
+  if (localStorage.getItem('safesync:sandbox-run') !== cfg.runId) {
+    for (const k of Object.keys(localStorage)) if (k.startsWith('safesync:')) localStorage.removeItem(k)
+    localStorage.setItem('safesync:settings', JSON.stringify(cfg.settings))
+    localStorage.setItem('safesync:draft', JSON.stringify(cfg.draft))
+    localStorage.setItem('safesync:sandbox-run', cfg.runId)
   }
 
   let chain = 1, account = cfg.accounts[1].address, rejectNext = false
@@ -50,9 +52,11 @@
     removeListener(event, f) { listeners[event] = (listeners[event] || []).filter(g => g !== f) },
   }
 
-  const info = { uuid: '00000000-0000-4000-8000-000000000000', name: 'Sandbox wallet', icon: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 1 1%22%3E%3Crect width=%221%22 height=%221%22 fill=%22%23f0b45a%22/%3E%3C/svg%3E', rdns: 'local.fanout.sandbox' }
+  const info = { uuid: '00000000-0000-4000-8000-000000000000', name: 'Sandbox wallet', icon: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 1 1%22%3E%3Crect width=%221%22 height=%221%22 fill=%22%23f0b45a%22/%3E%3C/svg%3E', rdns: 'local.safesync.sandbox' }
   const announce = () => window.dispatchEvent(new CustomEvent('eip6963:announceProvider', { detail: Object.freeze({ info, provider }) }))
   window.addEventListener('eip6963:requestProvider', announce)
+  // Capture runs before the app's listener, so other wallets' announcements never reach it.
+  if (cfg.walletOnly) window.addEventListener('eip6963:announceProvider', e => { if (e.detail?.info?.rdns !== info.rdns) e.stopImmediatePropagation() }, true)
   announce()
 
   const box = document.createElement('div')

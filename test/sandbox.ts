@@ -42,6 +42,14 @@ const ABI = parseAbi([
 ])
 const ZERO = '0x0000000000000000000000000000000000000000'
 
+const inUse = (port: number) => Bun.connect({ hostname: '127.0.0.1', port, socket: { data() {}, open(s) { s.end() } } }).then(() => true, () => false)
+function freePorts(n: number): number[] {
+  const listeners = Array.from({ length: n }, () => Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } }))
+  const ports = listeners.map(l => l.port)
+  listeners.forEach(l => l.stop(true))
+  return ports
+}
+
 /** Runtime code of the canonical Safe contracts, copied from Ethereum once and kept in test/fixtures. */
 async function safeCode(): Promise<Record<string, Hex>> {
   const file = Bun.file(`${root}test/fixtures/safe-contracts.json`)
@@ -59,7 +67,8 @@ async function safeCode(): Promise<Record<string, Hex>> {
 
 export type Sandbox = Awaited<ReturnType<typeof startSandbox>>
 
-export async function startSandbox({ basePort = 8601, servicePort = 0, rps = 2, log = false, signers = [], simple = false }: { basePort?: number; servicePort?: number; rps?: number; log?: boolean; signers?: Address[]; simple?: boolean } = {}) {
+/** `basePort` 0 picks free ports (tests); otherwise chains use basePort, basePort+1, … and must be free. */
+export async function startSandbox({ basePort = 0, servicePort = 0, rps = 2, log = false, signers = [], simple = false }: { basePort?: number; servicePort?: number; rps?: number; log?: boolean; signers?: Address[]; simple?: boolean } = {}) {
   // Owners are 9 addresses: local test accounts first, then yours. The rotation swaps owners 1 and 3, never yours.
   const mine = signers.map(a => getAddress(a))
   if (mine.length > 4) throw new Error('At most 4 signers: setup needs 5 local owners to sign')
@@ -67,9 +76,13 @@ export async function startSandbox({ basePort = 8601, servicePort = 0, rps = 2, 
   const pool = ACCOUNTS.slice(1, 10).filter(a => !mine.includes(a.address)).slice(0, 9 - mine.length)
   const owners = [...pool.map(a => a.address), ...mine]
   const ids = simple ? SIMPLE_CHAIN_IDS : CHAIN_IDS, noService = simple ? new Set<number>() : NO_SERVICE
+  const ports = basePort ? ids.map((_, i) => basePort + i) : freePorts(ids.length)
+  // Never latch onto a chain someone else is running: its state would be modified and the run would fail oddly.
+  const busy = (await Promise.all(ports.map(async p => ((await inUse(p)) ? p : 0)))).filter(Boolean)
+  if (busy.length) throw new Error(`Port${busy.length > 1 ? 's' : ''} ${busy.join(', ')} already in use; pick another --port`)
   const chains = ids.map((id, i) => ({
-    id, rpc: `http://127.0.0.1:${basePort + i}`,
-    proc: Bun.spawn(['anvil', '--chain-id', String(id), '--port', String(basePort + i), '--accounts', '12', '--silent'], { stdout: 'ignore', stderr: 'ignore' }),
+    id, rpc: `http://127.0.0.1:${ports[i]}`,
+    proc: Bun.spawn(['anvil', '--chain-id', String(id), '--port', String(ports[i]), '--accounts', '12', '--silent'], { stdout: 'ignore', stderr: 'ignore' }),
   }))
   const stopChains = () => chains.forEach(c => c.proc.kill())
   try {
@@ -82,6 +95,7 @@ export async function startSandbox({ basePort = 8601, servicePort = 0, rps = 2, 
       for (let i = 0; ; i++) {
         try { await wallet(c.id).getChainId(); break } catch { if (i > 100) throw new Error(`anvil on ${c.rpc} did not start`); await Bun.sleep(100) }
       }
+      if (c.proc.exitCode !== null || (await wallet(c.id).getChainId()) !== c.id) throw new Error(`${c.rpc} is not the chain this sandbox started`)
       for (const [a, bytecode] of Object.entries(code)) await wallet(c.id).request({ method: 'anvil_setCode' as any, params: [a, bytecode] as any })
       for (const a of mine) await wallet(c.id).request({ method: 'anvil_setBalance' as any, params: [a, '0x56bc75e2d63100000'] as any }) // 100 ETH
     }))
@@ -105,7 +119,8 @@ export async function startSandbox({ basePort = 8601, servicePort = 0, rps = 2, 
       const rc = await w.waitForTransactionReceipt({ hash: await w.sendTransaction({ to: tx.safe, data: execData(tx, sigs, 5), chain: null }) })
       if (rc.status !== 'success') throw new Error('setup execution failed')
     }
-    const finish = (service: ReturnType<typeof startMockService>, s: { team: Address; original?: Address; scroll141?: Address; targets: string; actions: string; owners: Address[] }) => ({
+    // `targets`/`actions` are the change in the text format (tests); `draft` is the same change for the app's editor.
+    const finish = (service: ReturnType<typeof startMockService>, s: { team: Address; original?: Address; scroll141?: Address; targets: string; actions: string; owners: Address[]; draft: { safes: string; edits: Record<string, string>; added: string[] } }) => ({
       ...s, chains: chains.map(({ id, rpc }) => ({ id, rpc })), rpc, service,
       serviceChains: ids.filter(id => !noService.has(id)), noServiceChains: [...noService],
       settings: {
@@ -122,7 +137,10 @@ export async function startSandbox({ basePort = 8601, servicePort = 0, rps = 2, 
       const safes = await Promise.all(ids.map(id => deploy(id, safeOwners, 11n, false, BigInt(safeOwners.length))))
       if (new Set(safes).size !== 1) throw new Error('Safe addresses differ across chains')
       const service = startMockService({ port: servicePort, rps, rpc, log })
-      return finish(service, { team: safes[0], targets: `${safes[0]} ${ids.join(' ')}`, actions: `add ${ACCOUNTS[2].address}\nadd ${ACCOUNTS[3].address}`, owners: safeOwners })
+      return finish(service, {
+        team: safes[0], targets: `${safes[0]} ${ids.join(' ')}`, actions: `add ${ACCOUNTS[2].address}\nadd ${ACCOUNTS[3].address}`, owners: safeOwners,
+        draft: { safes: safes[0], edits: {}, added: [ACCOUNTS[2].address, ACCOUNTS[3].address] },
+      })
     }
 
     // A harmless transaction, to move a Safe's nonce forward.
@@ -165,7 +183,10 @@ export async function startSandbox({ basePort = 8601, servicePort = 0, rps = 2, 
     // An unrelated transaction is queued on Gnosis at the same nonce: a conflict to notice.
     await propose({ chainId: 100, safe: team, nonce: 0, to: team, value: '0', data: encodeFunctionData({ abi: ABI, functionName: 'changeThreshold', args: [4n] }), operation: 0 }, pool[3])
 
-    return finish(service, { team, original, scroll141, targets, actions, owners })
+    return finish(service, {
+      team, original, scroll141, targets, actions, owners,
+      draft: { safes: `${team} eth:${original} scr:${scroll141}`, edits: { [owners[2].toLowerCase()]: INCOMING[0].address, [owners[0].toLowerCase()]: INCOMING[1].address }, added: [] },
+    })
   } catch (e) { stopChains(); throw e }
 }
 
@@ -179,26 +200,27 @@ if (import.meta.main) {
     const owner = sb.owners.indexOf(a.address), incoming = INCOMING.findIndex(i => i.address === a.address)
     return { address: a.address, label: owner >= 0 ? `Owner ${owner + 1}${signers.includes(a.address) ? ' (yours)' : ''}` : incoming >= 0 ? `Incoming owner ${incoming + 1}` : 'Not an owner' }
   })
-  const boot = `window.__SANDBOX__=${JSON.stringify({ runId, rpcs: sb.rpc, accounts: labels, settings: sb.settings, draft: { title: simple ? 'Add two owners (simple sandbox)' : 'Rotate 2 signers (sandbox)', targets: sb.targets, actions: sb.actions } })};\n${await Bun.file(`${root}test/sandbox-wallet.js`).text()}`
+  const draft = { title: simple ? 'Add two owners (simple sandbox)' : 'Rotate 2 signers (sandbox)', mode: 'owners', threshold: null, source: '', afterQueue: false, ...sb.draft }
+  const boot = `window.__SANDBOX__=${JSON.stringify({ runId, rpcs: sb.rpc, accounts: labels, settings: sb.settings, draft, walletOnly: !simple })};\n${await Bun.file(`${root}test/sandbox-wallet.js`).text()}`
   const server = Bun.serve({
     port,
     async fetch() {
-      const html = (await Bun.file(`${root}dist/fanout.html`).text()).replace('<head>', () => `<head><script>${boot}</script>`)
+      const html = (await Bun.file(`${root}dist/safe-sync.html`).text()).replace('<head>', () => `<head><script>${boot}</script>`)
       return new Response(html, { headers: { 'content-type': 'text/html' } })
     },
   })
   console.log(simple ? `
-Fanout simple sandbox: http://localhost:${server.port}
+Safe Sync simple sandbox: http://localhost:${server.port}
 
   Safe ${sb.team}, ${sb.owners.length}-of-${sb.owners.length}, owners ${sb.owners.join(', ')}
   on local chains ${SIMPLE_CHAIN_IDS.join(', ')} (RPC ${sb.chains[0].rpc} and up), mock Safe service on :${sb.service.port}
-  The change adds two owners. Sign once with each owner, then execute.
+  The draft adds two owners. Sign once with each owner, then execute.
 
   Your browser wallet adds each local chain the first time (one approval per chain), so signing and
   executing both go to these local chains. Remove those networks from the wallet afterwards.
   Ctrl-C to stop.
 ` : `
-Fanout sandbox: http://localhost:${server.port}
+Safe Sync sandbox: http://localhost:${server.port}
 
   ${CHAIN_IDS.length} local chains (${sb.noServiceChains.length} without a Safe service), mock Safe service on :${sb.service.port}
   Team Safe ${sb.team} (5-of-9) on every chain, original Safe ${sb.original} on Ethereum, Safe 1.4.1 ${sb.scroll141} on Scroll${signers.length ? `\n  Your signers are owners ${signers.map((a, i) => `${9 - signers.length + i + 1} (${a})`).join(', ')} on all of them, with 100 ETH on every local chain` : ''}
@@ -206,7 +228,9 @@ Fanout sandbox: http://localhost:${server.port}
   and the same rotation already queued on the original Safe with one signature.
 
   The draft is filled in: Prepare → Create signing link → Open to sign.
-  Choose who signs in the "Sandbox wallet" box at the bottom left. Ctrl-C to stop.
+  Choose who signs in the "Sandbox wallet" box at the bottom left. Other wallets are hidden here: these chains
+  use real chain ids, so a real wallet would send executions to the real networks (use --simple for that).
+  Ctrl-C to stop.
 `)
-  process.on('SIGINT', () => { sb.stop(); process.exit(0) })
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { sb.stop(); process.exit(0) })
 }

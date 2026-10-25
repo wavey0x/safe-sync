@@ -3,7 +3,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { createWalletClient, encodeFunctionData, http, parseAbi, publicActions, type Address, type Hex } from 'viem'
 import {
-  config, execData, normalizeSig, parseActions, parseTargets, payloadKey, prepareTarget, readSafe, safeTxHash, sigOwner,
+  config, execData, findSafe, normalizeSig, parseActions, parseTargets, payloadKey, prepareTarget, readSafe, safeTxHash, sigOwner,
   walletTypedData, type Prepared, type Tx,
 } from '../src/safe'
 import * as svc from '../src/service'
@@ -12,12 +12,17 @@ import { ACCOUNTS, CHAIN_IDS, INCOMING, OWNERS, startSandbox, type Sandbox } fro
 
 const enabled = !!Bun.which('anvil')
 let sb: Sandbox
-let prepared: Prepared[]
+// Every test can run alone: whichever needs the prepared batch first prepares it.
+let preparing: Promise<Prepared[]> | undefined
+const prepareAll = () => (preparing ??= (async () => {
+  const t = parseTargets(sb.targets), a = parseActions(sb.actions)
+  return Promise.all(t.targets.map(x => prepareTarget(x, a.actions, {})))
+})())
 
 beforeAll(async () => {
   if (!enabled) return
   // The client's 1 req/s pacing is a production setting; tests run the mock unthrottled to stay fast.
-  sb = await startSandbox({ basePort: 8801, rps: 1000 })
+  sb = await startSandbox({ rps: 1000 })
   for (const id of sb.serviceChains) svc.config.service[id] = sb.service.url(id)
   svc.config.gapMs = 0
 }, 120_000)
@@ -39,9 +44,9 @@ test.skipIf(!enabled)('prepare sorts the 16 Safes into ready and already applied
   const t = parseTargets(sb.targets), a = parseActions(sb.actions)
   expect([...t.errors, ...a.errors]).toEqual([])
   expect(t.targets).toHaveLength(16)
-  prepared = await Promise.all(t.targets.map(x => prepareTarget(x, a.actions, {})))
+  const prepared = await prepareAll()
   const linea = prepared.find(p => p.chainId === 59144)!
-  expect(linea.skip).toBe('Nothing to do')
+  expect(linea.skip).toBe('Already in sync')
   const ready = prepared.filter(p => p.tx && !p.error && !p.skip)
   expect(ready).toHaveLength(15)
   for (const p of ready) {
@@ -62,7 +67,7 @@ test.skipIf(!enabled)('prepare sorts the 16 Safes into ready and already applied
 }, 60_000)
 
 test.skipIf(!enabled)('five owners sign everything through the service, then one executor runs it on every chain', async () => {
-  const ready = prepared.filter(p => p.tx && !p.error && !p.skip)
+  const ready = (await prepareAll()).filter(p => p.tx && !p.error && !p.skip)
   const offline = new Map<string, { owner: Address; sig: Hex }[]>()
   for (const owner of OWNERS.slice(0, 5)) {
     for (const p of ready) {
@@ -142,7 +147,7 @@ test.skipIf(!enabled)('Safe service rules the client depends on', async () => {
 }, 60_000)
 
 test.skipIf(!enabled)('simple mode: the two well-known test wallets run a 2-of-2 Safe on three local chains', async () => {
-  const simple = await startSandbox({ simple: true, basePort: 8901, rps: 1000 })
+  const simple = await startSandbox({ simple: true, rps: 1000 })
   try {
     for (const id of simple.serviceChains) svc.config.service[id] = simple.service.url(id)
     const [a0, a1] = ACCOUNTS
@@ -159,4 +164,10 @@ test.skipIf(!enabled)('simple mode: the two well-known test wallets run a 2-of-2
       expect((await readSafe(p.chainId, p.safe)).owners).toHaveLength(4)
     }
   } finally { simple.stop() }
+}, 60_000)
+
+test.skipIf(!enabled)('finding the team Safe by address turns up every chain it is on', async () => {
+  const found = await findSafe(sb.team, 8000, CHAIN_IDS)
+  expect(found.filter(f => f.state).map(f => f.chainId).sort((a, b) => a - b)).toEqual([...CHAIN_IDS].sort((a, b) => a - b))
+  expect(found.some(f => f.error)).toBe(false)
 }, 60_000)

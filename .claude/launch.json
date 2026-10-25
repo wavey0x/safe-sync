@@ -2,7 +2,7 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "fanout",
+      "name": "safe-sync",
       "runtimeExecutable": "bun",
       "runtimeArgs": [
         "scripts/build.ts",

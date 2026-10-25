@@ -56,6 +56,13 @@ export async function getTx(chainId: number, hash: Hex): Promise<ServiceTx | nul
   return res.json()
 }
 
+/** Every transaction at one nonce of a Safe, executed or not: ours (with its confirmations) and any competitor, in one request. */
+export async function atNonce(chainId: number, safe: Address, nonce: number): Promise<ServiceTx[]> {
+  const res = await api(chainId, `/v2/safes/${safe}/multisig-transactions/?nonce=${nonce}&limit=20`)
+  if (!res.ok) await fail(res)
+  return (await res.json()).results
+}
+
 /** Other not-yet-executed transactions queued at or after `nonce` (potential conflicts). */
 export async function queued(chainId: number, safe: Address, nonce: number): Promise<{ nonce: number; safeTxHash: Hex }[]> {
   const res = await api(chainId, `/v2/safes/${safe}/multisig-transactions/?executed=false&nonce__gte=${nonce}&limit=50`)
@@ -69,7 +76,7 @@ export async function submit(tx: Tx, hash: Hex, owner: Address, signature: Hex, 
   const propose = () => api(tx.chainId, `/v2/safes/${tx.safe}/multisig-transactions/`, {
     to: tx.to, value: tx.value, data: tx.data === '0x' ? null : tx.data, operation: tx.operation,
     safeTxGas: '0', baseGas: '0', gasPrice: '0', gasToken: ZERO, refundReceiver: ZERO, nonce: String(tx.nonce),
-    contractTransactionHash: hash, sender: owner, signature, origin: JSON.stringify({ name: 'Fanout' }),
+    contractTransactionHash: hash, sender: owner, signature, origin: JSON.stringify({ name: 'Safe Sync' }),
   })
   let res = await (proposed ? confirm() : propose())
   // Someone else proposed (or the proposal vanished) in the meantime: try the other route once.

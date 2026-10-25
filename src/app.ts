@@ -5,42 +5,51 @@ import { live } from 'lit-html/directives/live.js'
 import { getAddress, isAddress, toHex, type Address, type Hex } from 'viem'
 import { CHAINS } from './chains'
 import {
-  batchId, chainName, chainOf, client, config, decodeBatch, describe, domainHash, encodeBatch, execData, linesFromTx,
-  messageHash, msg, normalizeSig, onchainHash, parseActions, parseTargets, payloadKey, prepareTarget, readSafe,
-  resolveNames, revertData, revertReason, SAFE_ABI, safeTxHash, short, sigOwner, walletTypedData,
-  type Batch, type Prepared, type Step, type Tx,
+  batchId, chainName, chainOf, client, config, decodeBatch, describe, domainHash, encodeBatch, execData, findSafe, linesFromTx,
+  linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, payloadKey, prepareTarget, readSafe, resolveNames,
+  revertData, revertReason, SAFE_ABI, safeTxHash, short, sigOwner, walletTypedData,
+  type Action, type Batch, type Found, type Prepared, type Step, type Tx,
 } from './safe'
 import * as svc from './service'
 
 // ---------------------------------------------------------------- state
 
-type Sig = { owner: Address; sig: Hex; posted: boolean }
+type Sig = { owner: Address; sig: Hex; posted: boolean; uploading?: boolean }
 type Kind = 'loading' | 'collecting' | 'ready' | 'waiting' | 'executed' | 'blocked' | 'unknown'
 type Row = {
   tx: Tx; hash: Hex; sigs: Record<string, Sig>
   owners?: Address[]; threshold?: number; chainNonce?: number
   svc: 'loading' | 'ok' | 'none' | 'error'; proposed: boolean; svcExecuted?: boolean; readAt: number
-  phase?: string; error?: string; fatal?: string; execHash?: Hex; open?: boolean
+  others: { safeTxHash: Hex; isExecuted: boolean }[] // other transactions at the same nonce
+  phase?: string; error?: string; fatal?: string; execHash?: Hex; execOk?: boolean; open?: boolean
   loaded?: Promise<void>; posting?: Promise<void>
 }
 type Wallet = { info: { name: string; icon: string; rdns: string }; provider: any }
 type Result = { before: [number, number]; after: [number, number] }
+/** What the proposer entered. Also stored in the link, so "edit as new batch" can bring it back. */
+type Draft = {
+  title: string; safes: string; mode: 'owners' | 'replicate'
+  edits: Record<string, string | null> // current owner (lowercase) → replacement, or null to remove
+  added: string[]; threshold: number | null; source: string; afterQueue: boolean
+}
+type Pick = Found & { selected: boolean }
 
 let storageOk = true
 const store = {
   get: <T>(k: string, d: T): T => { try { return JSON.parse(localStorage.getItem(k) ?? '') ?? d } catch { return d } },
   set: (k: string, v: unknown) => { try { localStorage.setItem(k, JSON.stringify(v)) } catch { storageOk = false } },
 }
-const draft = store.get('fanout:draft', { title: '', targets: '', actions: '' })
+const blank = (): Draft => ({ title: '', safes: '', mode: 'owners', edits: {}, added: [], threshold: null, source: '', afterQueue: false })
 
 const S = {
   mode: 'compose' as 'compose' | 'batch',
-  title: draft.title, targets: draft.targets, actions: draft.actions, afterQueue: false, importRef: '',
+  d: { ...blank(), ...store.get<Partial<Draft>>('safesync:draft', {}) } as Draft,
+  found: [] as Pick[], finding: false, lines: '', sourceNote: '',
   preparing: false, prepared: [] as Prepared[], errors: [] as string[], names: {} as Record<string, Address>, link: '',
   batch: null as Batch | null, id: '', rows: [] as Row[], loadError: '', pasted: '',
   wallets: [] as Wallet[], provider: null as any, account: null as Address | null, choosing: false,
-  signing: false, executing: false, current: null as Row | null, notice: '',
-  settingsOpen: false, settingsErrors: [] as string[], settings: store.get('fanout:settings', { rpc: '', service: '', apiKey: '' }),
+  signing: false, executing: false, waiting: false, current: null as Row | null, notice: '',
+  settingsOpen: false, settingsErrors: [] as string[], settings: store.get('safesync:settings', { rpc: '', service: '', apiKey: '' }),
 }
 
 let queued = false
@@ -54,7 +63,6 @@ const update = () => {
     if (S.signing || S.executing) document.querySelector('tr.active')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
   })
 }
-const saveDraft = () => store.set('fanout:draft', { title: S.title, targets: S.targets, actions: S.actions })
 
 /** Parses "chain url" lines; returns the problems instead of silently skipping them. */
 function applySettings(): string[] {
@@ -72,22 +80,114 @@ function applySettings(): string[] {
 }
 applySettings()
 
-// ---------------------------------------------------------------- compose
+// ---------------------------------------------------------------- compose: which Safes
 
 // Bumped on every edit: results of an older Prepare are discarded, so a link never carries stale transactions.
 let run = 0
 function edited() {
   run++
   S.prepared = []; S.link = ''; S.preparing = false
-  saveDraft(); update()
+  store.set('safesync:draft', S.d); update()
+}
+
+/** Bare addresses are looked for on every chain; chain:0x… and Safe{Wallet} links name one Safe. */
+async function find() {
+  const tokens = S.d.safes.split(/[\s,]+/).filter(Boolean)
+  const exact: { chain: string; safe: string }[] = [], anywhere: string[] = []
+  for (const t of tokens) {
+    const m = t.match(/(?:safe=)?([a-z0-9-]+):(0x[0-9a-fA-F]{40})/i)
+    if (m) exact.push({ chain: m[1], safe: m[2] })
+    else if (isAddress(t)) anywhere.push(t)
+    else return (S.errors = [`"${t}" isn't a Safe address, chain:0xSafe or Safe{Wallet} link`]), update()
+  }
+  S.errors = []; S.finding = true; S.found = []; edited()
+  const results = await Promise.all([
+    ...anywhere.map(a => findSafe(getAddress(a))),
+    ...exact.map(async ({ chain, safe }): Promise<Found[]> => {
+      const c = chainOf(chain)
+      if (!c) { S.errors.push(`Unknown chain "${chain}"`); return [] }
+      try { return [{ chainId: c.id, safe: getAddress(safe), state: await readSafe(c.id, getAddress(safe)) }] } catch (e) { return [{ chainId: c.id, safe: getAddress(safe), error: msg(e) }] }
+    }),
+  ])
+  const seen = new Set<string>()
+  S.found = results.flat().filter(f => !seen.has(`${f.chainId}:${f.safe}`) && seen.add(`${f.chainId}:${f.safe}`)).map(f => ({ ...f, selected: !!f.state }))
+  if (!S.found.length) S.errors.push('No Safe found at that address on any chain.')
+  S.finding = false; update()
+}
+
+async function retry(p: Pick) {
+  p.error = undefined; update()
+  try { p.state = await readSafe(p.chainId, p.safe); p.selected = true } catch (e) { p.error = msg(e) }
+  edited()
+}
+
+const selected = () => S.found.filter(f => f.selected && f.state)
+
+/** The owner list most of the selected Safes share, in the order of the first one that has it. */
+function baseOwners() {
+  const sel = selected(), key = (o: Address[]) => o.map(a => a.toLowerCase()).sort().join()
+  const counts = new Map<string, number>()
+  for (const f of sel) counts.set(key(f.state!.owners), (counts.get(key(f.state!.owners)) ?? 0) + 1)
+  const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
+  const first = sel.find(f => top && key(f.state!.owners) === top[0])
+  const thresholds = sel.filter(f => f === first || (top && key(f.state!.owners) === top[0])).map(f => f.state!.threshold)
+  return { owners: first?.state!.owners ?? [], threshold: thresholds.sort((a, b) => thresholds.filter(x => x === b).length - thresholds.filter(x => x === a).length)[0] ?? 1, share: top?.[1] ?? 0, total: sel.length }
+}
+
+/** The owner list every Safe should end up with, built from the base list and the edits. */
+function targetOwners() {
+  const base = baseOwners()
+  const kept = base.owners.flatMap(o => { const e = S.d.edits[o.toLowerCase()]; return e === null ? [] : [e && e.trim() ? e.trim() : o] })
+  const owners = [...kept, ...S.d.added.map(a => a.trim()).filter(Boolean)]
+  // In the order the replacements were made, which is also the order someone queuing it by hand would use.
+  const replace = Object.entries(S.d.edits).flatMap(([k, e]) => {
+    const o = base.owners.find(b => b.toLowerCase() === k)
+    return o && e && e.trim() ? [[o, e.trim()] as [string, string]] : []
+  })
+  return { owners, replace, threshold: S.d.threshold ?? Math.min(base.threshold, owners.length || 1) }
+}
+
+const validOwner = (s: string) => isAddress(s) || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.eth$/i.test(s)
+
+// ---------------------------------------------------------------- compose: replicate a transaction
+
+async function loadSource() {
+  const src = S.d.source.trim()
+  try {
+    if (src.startsWith('{')) {
+      const j = JSON.parse(src)
+      S.lines = linesFromTxBuilder(j)
+      S.sourceNote = `${plural(j.transactions.length, 'call')} from a Transaction Builder file`
+    } else {
+      const hash = src.match(/0x[0-9a-fA-F]{64}/)?.[0] as Hex | undefined
+      const chain = chainOf(src.match(/safe=([a-z0-9-]+):/i)?.[1] ?? src.match(/^([a-z0-9-]+):0x/i)?.[1] ?? '')
+      if (!hash || !chain) throw new Error('Paste a Safe{Wallet} transaction link, or a Transaction Builder JSON file')
+      const t = await svc.getTx(chain.id, hash)
+      if (!t) throw new Error('That transaction isn\'t in the Safe Transaction Service')
+      S.lines = linesFromTx(t)
+      S.sourceNote = `From ${chain.name} ${short(t.safe)}, nonce ${t.nonce}`
+    }
+    S.errors = []
+  } catch (e) { S.lines = ''; S.sourceNote = ''; S.errors = [msg(e)] }
+  edited()
+}
+
+// ---------------------------------------------------------------- compose: prepare and share
+
+function actionsFor(): { actions: Action[]; errors: string[] } {
+  if (S.d.mode === 'replicate') return S.lines ? parseActions(S.lines) : { actions: [], errors: ['Load a transaction to replicate first.'] }
+  const t = targetOwners(), errors: string[] = []
+  for (const o of [...t.owners, ...t.replace.map(r => r[1])]) if (!validOwner(o)) errors.push(`"${o}" isn't an address or name.eth`)
+  if (t.threshold < 1 || t.threshold > t.owners.length) errors.push(`Threshold ${t.threshold} doesn't fit ${plural(t.owners.length, 'owner')}`)
+  return { actions: [{ kind: 'sync', owners: t.owners, threshold: t.threshold, replace: t.replace }], errors }
 }
 
 async function prepare() {
   const my = ++run
-  const t = parseTargets(S.targets), a = parseActions(S.actions)
-  S.errors = [...t.errors, ...a.errors]
-  if (!t.targets.length) S.errors.push('Add at least one Safe.')
-  if (!a.actions.length) S.errors.push('Add at least one action.')
+  const targets = selected().map(f => ({ chainId: f.chainId, safe: f.safe }))
+  const a = actionsFor()
+  S.errors = [...a.errors]
+  if (!targets.length) S.errors.push('Find and select at least one Safe.')
   S.prepared = []; S.link = ''
   if (S.errors.length) return update()
   S.preparing = true; update()
@@ -95,24 +195,29 @@ async function prepare() {
     const names = await resolveNames(a.actions)
     if (my !== run) return
     S.names = names
-    S.prepared = t.targets.map(x => ({ ...x, notes: [] }))
+    S.prepared = targets.map(x => ({ ...x, notes: ['checking the queue…'] }))
     update()
-    await Promise.all(t.targets.map(async (x, i) => {
-      const p = await prepareTarget(x, a.actions, names, S.afterQueue ? queueEnd : undefined)
+    await Promise.all(targets.map(async (x, i) => {
+      const p = await prepareTarget(x, a.actions, names, S.d.afterQueue ? queueEnd : undefined)
       if (my !== run) return
+      p.notes.unshift('checking the queue…')
       S.prepared[i] = p; update()
-      if (p.tx && !p.error && svc.serviceUrl(p.chainId)) checkQueue(p, my) // only adds notes; doesn't hold up the link
+      await checkQueue(p, my)
     }))
   } catch (e) { if (my === run) S.errors.push(msg(e)) }
   if (my === run) { S.preparing = false; update() }
 }
 
+/** Notes transactions already queued at this nonce: the same one (its signatures count) or a competitor. */
 async function checkQueue(p: Prepared, my: number) {
+  const drop = () => (p.notes = p.notes.filter(n => n !== 'checking the queue…'))
+  if (!p.tx || p.error || !svc.serviceUrl(p.chainId)) return void drop()
   try {
-    const q = await svc.queued(p.chainId, p.safe, p.tx!.nonce)
+    const q = await svc.queued(p.chainId, p.safe, p.tx.nonce)
+    drop()
     if (q.some(o => o.safeTxHash === p.hash)) p.notes.push('already queued in Safe{Wallet}; its signatures count')
-    else if (q.some(o => o.nonce === p.tx!.nonce)) p.notes.push(`⚠ another transaction is queued at nonce ${p.tx!.nonce}`)
-  } catch (e) { p.notes.push(`queue check failed: ${msg(e)}`) }
+    else if (q.some(o => o.nonce === p.tx!.nonce)) p.notes.push(`⚠ another transaction is queued at nonce ${p.tx.nonce}`)
+  } catch (e) { drop(); p.notes.push(`queue check failed: ${msg(e)}`) }
   if (my === run) update()
 }
 
@@ -122,26 +227,12 @@ async function queueEnd(chainId: number, safe: Address, nonce: number): Promise<
   return Math.max(nonce, ...q.map(o => o.nonce + 1))
 }
 
-async function importTx() {
-  try {
-    const ref = S.importRef.trim()
-    const hash = ref.match(/0x[0-9a-fA-F]{64}/)?.[0] as Hex | undefined
-    const chain = chainOf(ref.match(/safe=([a-z0-9-]+):/i)?.[1] ?? ref.match(/^([a-z0-9-]+):0x/i)?.[1] ?? '')
-    if (!hash || !chain) throw new Error('Paste a Safe{Wallet} transaction link, or chain:0xsafeTxHash')
-    const t = await svc.getTx(chain.id, hash)
-    if (!t) throw new Error('Transaction not found in the Safe Transaction Service')
-    S.actions = [S.actions.trim(), `# from ${chain.short} ${short(t.safe)} nonce ${t.nonce}`, linesFromTx(t)].filter(Boolean).join('\n')
-    S.importRef = ''; S.errors = []
-    edited()
-  } catch (e) { S.errors = [msg(e)]; update() }
-}
-
-const prepKind = (p: Prepared) => (p.error ? 'attention' : p.skip ? 'applied' : p.tx ? 'ready' : 'loading')
+const prepKind = (p: Prepared) => (p.error ? 'attention' : p.skip ? 'synced' : p.tx ? 'ready' : 'loading')
 
 async function createLink() {
   const ready = S.prepared.filter(p => prepKind(p) === 'ready')
   const labels = Object.fromEntries(Object.entries(S.names).map(([n, a]) => [a.toLowerCase(), n]))
-  const batch: Batch = { title: S.title.trim() || 'Untitled batch', created: Date.now(), txs: ready.map(p => p.tx!), labels, src: { targets: S.targets, actions: S.actions } }
+  const batch: Batch = { title: S.d.title.trim() || 'Untitled batch', created: Date.now(), txs: ready.map(p => p.tx!), labels, src: S.d }
   S.link = `${location.href.split('#')[0]}#${await encodeBatch(batch)}`
   copy(S.link)
 }
@@ -149,7 +240,7 @@ async function createLink() {
 // ---------------------------------------------------------------- batch
 
 // Signatures are kept per safeTxHash, so they carry over when a batch is edited into a new link.
-const sigKey = (h: Hex) => `fanout:sig:${h}`
+const sigKey = (h: Hex) => `safesync:sig:${h}`
 const saveSigs = (r: Row) => store.set(sigKey(r.hash), Object.fromEntries(Object.entries(r.sigs).map(([k, s]) => [k, { owner: s.owner, sig: s.sig }])))
 
 async function openBatch(encoded: string) {
@@ -158,7 +249,7 @@ async function openBatch(encoded: string) {
     S.batch = batch; S.id = batchId(batch); S.mode = 'batch'; S.loadError = ''
     S.rows = batch.txs.map(tx => {
       const hash = safeTxHash(tx), saved = store.get<Record<string, { owner: Address; sig: Hex }>>(sigKey(hash), {})
-      return { tx, hash, sigs: Object.fromEntries(Object.entries(saved).map(([k, s]) => [k, { ...s, posted: false }])), svc: 'loading', proposed: false, readAt: 0 }
+      return { tx, hash, sigs: Object.fromEntries(Object.entries(saved).map(([k, s]) => [k, { ...s, posted: false }])), svc: 'loading', proposed: false, readAt: 0, others: [] }
     })
     S.rows.forEach(r => (r.loaded = loadRow(r)))
   } catch (e) { S.loadError = `This link is not a valid batch: ${msg(e)}`; S.mode = 'batch' }
@@ -179,9 +270,12 @@ async function loadRow(r: Row) {
   if (r.svc === 'ok' && needsWork(r)) for (const s of Object.values(r.sigs)) if (!s.posted) post(r, s)
 }
 
+/** One request: this transaction's confirmations and execution, plus anything else at the same nonce. */
 async function readService(r: Row) {
   try {
-    const t = await svc.getTx(r.tx.chainId, r.hash)
+    const all = await svc.atNonce(r.tx.chainId, r.tx.safe, r.tx.nonce)
+    const t = all.find(x => x.safeTxHash.toLowerCase() === r.hash.toLowerCase())
+    r.others = all.filter(x => x !== t).map(x => ({ safeTxHash: x.safeTxHash, isExecuted: x.isExecuted }))
     r.proposed = !!t; r.svcExecuted = t?.isExecuted; r.readAt = Date.now(); r.svc = 'ok'
     // The service is the truth: a local signature counts as uploaded only if the service has it
     // (a proposal can be deleted in Safe{Wallet}; an upload can fail after the device signed).
@@ -197,13 +291,14 @@ async function verify(r: Row) {
 }
 
 function post(r: Row, s: Sig) {
+  s.uploading = true
   r.posting = (r.posting ?? Promise.resolve()).then(async () => {
-    if (s.posted) return
+    if (s.posted) return void (s.uploading = false)
     try {
       await svc.submit(r.tx, r.hash, s.owner, s.sig, r.proposed)
       s.posted = true; r.proposed = true; r.error = undefined
-    } catch (e) { r.error = `Signed but not uploaded: ${msg(e)}. Refresh retries; you can also copy it below.` }
-    update()
+    } catch (e) { r.error = `Signed but not uploaded: ${msg(e)}` }
+    s.uploading = false; update()
   })
 }
 
@@ -213,8 +308,8 @@ function status(r: Row): { kind: Kind; text: string } {
   if (r.fatal) return { kind: 'blocked', text: r.fatal }
   if (r.chainNonce === undefined) return r.error ? { kind: 'unknown', text: r.error } : { kind: 'loading', text: 'loading…' }
   if (r.chainNonce > r.tx.nonce) {
-    if (r.svcExecuted || r.execHash) return { kind: 'executed', text: 'executed' }
-    if (r.svc === 'loading') return { kind: 'loading', text: 'checking…' }
+    if (r.svcExecuted || r.execOk) return { kind: 'executed', text: 'executed' }
+    if (r.svc === 'loading' || r.execHash) return { kind: 'loading', text: 'checking…' }
     if (r.svc === 'ok') return { kind: 'blocked', text: `nonce ${r.tx.nonce} was used by another transaction` }
     return { kind: 'unknown', text: `nonce ${r.tx.nonce} is used; can't confirm it was this transaction` }
   }
@@ -242,7 +337,7 @@ async function connect(w?: Wallet) {
     S.provider = provider; S.account = getAddress(account)
     provider.on?.('accountsChanged', (a: Address[]) => {
       S.account = a[0] ? getAddress(a[0]) : null
-      if (S.signing || S.executing) S.signing = S.executing = false, S.notice = 'Wallet account changed, so I stopped.'
+      if (S.signing || S.executing) stop('Wallet account changed, so I stopped.')
       update()
     })
   } catch (e) { S.notice = msg(e) }
@@ -264,11 +359,19 @@ async function ensureChain(id: number) {
 
 const rejected = (e: any) => e?.code === 4001 || e?.cause?.code === 4001 || /reject|denied|cancel/i.test(msg(e))
 
+// Each run gets an id; Pause bumps it, so an older run that wakes up after a pending request stops.
+let session = 0
+function stop(notice = '') { session++; S.signing = S.executing = false; S.notice = notice; update() }
+/** One wallet request at a time; while it is pending the start buttons stay disabled, even after Pause. */
+async function ask<T>(f: () => Promise<T>): Promise<T> {
+  S.waiting = true; update()
+  try { return await f() } finally { S.waiting = false; update() }
+}
+
 async function signAll() {
-  const account = S.account!
+  const account = S.account!, my = ++session
   S.signing = true; S.notice = ''; update()
-  // Every await is a chance for Pause or an account switch: check before each wallet request.
-  const stopped = () => !S.signing || S.account !== account
+  const stopped = () => my !== session || S.account !== account
   for (const r of S.rows) {
     if (stopped()) break
     await r.loaded
@@ -282,33 +385,34 @@ async function signAll() {
       if (r.svc !== 'none' && Date.now() - r.readAt > 30_000) await readService(r)
       if (stopped() || !canSign(r)) continue
       r.phase = 'switching network'; update()
-      await ensureChain(r.tx.chainId)
+      await ask(() => ensureChain(r.tx.chainId))
       if (stopped()) break
       r.phase = 'confirm in your wallet'; update()
-      const sig = normalizeSig(await S.provider.request({ method: 'eth_signTypedData_v4', params: [account, walletTypedData(r.tx)] }))
+      const sig = normalizeSig(await ask(() => S.provider.request({ method: 'eth_signTypedData_v4', params: [account, walletTypedData(r.tx)] })))
       if ((await sigOwner(r.hash, sig))?.toLowerCase() !== account.toLowerCase()) throw new Error('The wallet returned a signature for a different account or message')
+      // Kept even if Pause was pressed while the wallet was open: it is a valid signature.
       const s = (r.sigs[account.toLowerCase()] = { owner: account, sig, posted: false })
       r.error = undefined; saveSigs(r)
       if (svc.serviceUrl(r.tx.chainId)) post(r, s)
     } catch (e) {
-      if (rejected(e)) { S.signing = false; S.notice = 'Paused: the request was rejected in your wallet.' }
+      if (rejected(e)) stop('Paused: the request was rejected in your wallet.')
       else r.error = msg(e)
     } finally { r.phase = undefined; update() }
   }
-  S.signing = false; S.current = null; update()
+  if (my === session) { S.signing = false; S.current = null; update() }
 }
 
 async function executeAll() {
-  const account = S.account!
+  const account = S.account!, my = ++session
   S.executing = true; S.notice = ''; update()
-  const stopped = () => !S.executing || S.account !== account
+  const stopped = () => my !== session || S.account !== account
   for (const r of S.rows) {
     if (stopped()) break
     if (status(r).kind !== 'ready') continue
     S.current = r
     try {
       r.phase = 'switching network'; update()
-      await ensureChain(r.tx.chainId)
+      await ask(() => ensureChain(r.tx.chainId))
       const c = client(r.tx.chainId)
       const data = execData(r.tx, validSigs(r), r.threshold!)
       r.phase = 'simulating'; update()
@@ -318,28 +422,29 @@ async function executeAll() {
       const gas = await c.estimateGas({ account, to: r.tx.safe, data })
       if (stopped()) break
       r.phase = 'confirm in your wallet'; update()
-      r.execHash = await S.provider.request({ method: 'eth_sendTransaction', params: [{ from: account, to: r.tx.safe, data, gas: toHex((gas * 13n) / 10n) }] })
+      r.execHash = await ask(() => S.provider.request({ method: 'eth_sendTransaction', params: [{ from: account, to: r.tx.safe, data, gas: toHex((gas * 13n) / 10n) }] }))
+      // Only a successful receipt counts as executed; a broadcast hash alone doesn't.
       c.waitForTransactionReceipt({ hash: r.execHash! }).then(rc => {
-        if (rc.status === 'success') r.chainNonce = r.tx.nonce + 1, r.svcExecuted = true
+        if (rc.status === 'success') r.execOk = true, r.chainNonce = r.tx.nonce + 1
         else r.error = 'Execution reverted', r.execHash = undefined
         update()
-      }, e => { r.error = msg(e); update() })
+      }, e => { r.error = msg(e); r.execHash = undefined; update() })
     } catch (e) {
-      if (rejected(e)) { S.executing = false; S.notice = 'Paused: the request was rejected in your wallet.' }
+      if (rejected(e)) stop('Paused: the request was rejected in your wallet.')
       else r.error = msg(e)
     } finally { r.phase = undefined; update() }
   }
-  S.executing = false; S.current = null; update()
+  if (my === session) { S.executing = false; S.current = null; update() }
 }
 
 // Signatures the Safe service doesn't hold (no service on the chain, or upload failed) can be shared as a bundle.
 const unshared = (r: Row) => (r.svc === 'loading' || !needsWork(r) ? [] : Object.values(r.sigs).filter(s => r.svc !== 'ok' || !s.posted))
-const exportSigs = () => `fanout-sigs:${btoa(JSON.stringify(S.rows.flatMap(r => unshared(r).map(s => [r.hash, s.sig]))))}`
+const exportSigs = () => `safesync-sigs:${btoa(JSON.stringify(S.rows.flatMap(r => unshared(r).map(s => [r.hash, s.sig]))))}`
 
 async function importSigs() {
   let added = 0
   try {
-    for (const m of S.pasted.matchAll(/fanout-sigs:([A-Za-z0-9+/=]+)/g)) {
+    for (const m of S.pasted.matchAll(/safesync-sigs:([A-Za-z0-9+/=]+)/g)) {
       for (const [hash, sig] of JSON.parse(atob(m[1])) as [Hex, Hex][]) {
         const r = S.rows.find(r => r.hash === hash)
         const owner = r && (await sigOwner(hash, sig).catch(() => undefined))
@@ -349,7 +454,7 @@ async function importSigs() {
         if (r.svc === 'ok' && needsWork(r)) post(r, s)
       }
     }
-    S.notice = `Added ${added} signature${added === 1 ? '' : 's'}.`; S.pasted = ''
+    S.notice = `Added ${plural(added, 'signature')}.`; S.pasted = ''
   } catch (e) { S.notice = `Could not read signatures: ${msg(e)}` }
   update()
 }
@@ -361,9 +466,12 @@ function refresh() {
 
 function edit() {
   if (!S.batch) return
-  S.title = S.batch.title; S.targets = S.batch.src.targets; S.actions = S.batch.src.actions
+  const src = S.batch.src as Partial<Draft> | null
+  S.d = { ...blank(), ...(src && typeof src === 'object' ? src : {}), title: S.batch.title }
   history.pushState(null, '', location.pathname + location.search)
   S.mode = 'compose'; edited()
+  if (S.d.safes) find()
+  if (S.d.mode === 'replicate' && S.d.source) loadSource()
 }
 
 // ---------------------------------------------------------------- view helpers
@@ -382,6 +490,7 @@ const safeLink = (tx: { chainId: number; safe: string }, hash?: string) => {
 }
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 const fmt = ([t, n]: [number, number]) => `${t}-of-${n}`
+const argValue = (v: string, labels: Record<string, string>) => (isAddress(v) ? addr(v, labels) : v === 'this Safe' ? html`<b>this Safe</b>` : html`<span class="mono wrap">${v}</span>`)
 
 /** Every decoded field, for the technical view. */
 function steps(list: Step[], labels: Record<string, string>) {
@@ -389,14 +498,14 @@ function steps(list: Step[], labels: Record<string, string>) {
     <b>${s.target === 'self' ? 'this Safe' : addr(s.target, labels)}</b> · <span class="fn">${s.fn}</span>
     ${s.op === 1 ? html`<span class="bad"> DELEGATECALL</span>` : nothing}
     ${s.value ? html` · value ${s.value.toString()} wei` : nothing}
-    ${s.args.length ? html`<div class="args">${s.args.map(([k, v]) => html`<div><span class="muted">${k}</span> ${isAddress(v) ? addr(v, labels) : v === 'this Safe' ? html`<b>this Safe</b>` : html`<span class="mono wrap">${v}</span>`}</div>`)}</div>` : nothing}
+    ${s.args.length ? html`<div class="args">${s.args.map(([k, v]) => html`<div><span class="muted">${k}</span> ${argValue(v, labels)}</div>`)}</div>` : nothing}
     ${s.raw ? html`<div class="mono small wrap">${s.raw}</div>` : nothing}
   </li>`)}</ol>`
 }
 
 const OWNER_FNS = ['swapOwner', 'addOwnerWithThreshold', 'removeOwner', 'changeThreshold']
 
-/** One plain-language line per step. The key ignores encoding details such as prevOwner. */
+/** One plain-language line per step. Owner changes ignore encoding details such as prevOwner; calls keep their arguments. */
 function intent(s: Step, labels: Record<string, string>): { key: string; view: TemplateResult } {
   const a = Object.fromEntries(s.args)
   if (s.target === 'self' && s.op === 0) {
@@ -408,7 +517,7 @@ function intent(s: Step, labels: Record<string, string>): { key: string; view: T
   const target = s.target === 'self' ? html`this Safe` : addr(s.target, labels)
   return {
     key: JSON.stringify([s.target, s.fn, s.args, String(s.value), s.op, s.raw]),
-    view: html`${s.op === 1 ? html`<b class="bad">DELEGATECALL </b>` : nothing}Call <span class="fn">${s.fn}</span> on ${target}${s.value ? html` with ${s.value.toString()} wei` : nothing}`,
+    view: html`${s.op === 1 ? html`<b class="bad">DELEGATECALL </b>` : nothing}Call <span class="fn">${s.fn}</span>${s.args.length ? html`(${s.args.map(([k, v], i) => html`${i ? ', ' : ''}<span class="muted">${k}</span> ${argValue(v, labels)}`)})` : nothing} on ${target}${s.value ? html` with ${s.value.toString()} wei` : nothing}`,
   }
 }
 
@@ -442,35 +551,92 @@ function changeView(txs: Tx[], result: (tx: Tx) => Result | undefined, labels: R
 
 // ---------------------------------------------------------------- compose view
 
+function safesCard() {
+  const byAddress = new Map<string, Pick[]>()
+  for (const f of S.found) byAddress.set(f.safe, [...(byAddress.get(f.safe) ?? []), f])
+  const toggle = (f: Pick) => { if (f.state) { f.selected = !f.selected; edited() } else retry(f) }
+  return html`<section class="card">
+    <input class="title" placeholder="Title, like Rotate signers Q4" .value=${live(S.d.title)} @input=${(e: any) => { S.d.title = e.target.value; store.set('safesync:draft', S.d) }}>
+    <label><span>Safe</span>
+      <div class="row">
+        <input class="grow mono" placeholder="0x… (looked for on every chain), eth:0x…, or a Safe{Wallet} link" .value=${live(S.d.safes)}
+          @input=${(e: any) => { S.d.safes = e.target.value; store.set('safesync:draft', S.d) }} @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && find()}>
+        <button class=${S.found.length ? '' : 'primary'} @click=${find} ?disabled=${S.finding || !S.d.safes.trim()}>${S.finding ? 'Looking…' : 'Find'}</button>
+      </div>
+      <small>A bare address is looked for on every chain. Add Safes at other addresses as <code>chain:0x…</code>, separated by spaces.</small>
+    </label>
+    ${[...byAddress.entries()].map(([safe, list]) => {
+      const ok = list.filter(f => f.state), bad = list.filter(f => !f.state)
+      return html`<div class="found">
+        <div class="small"><span class="mono" title=${safe}>${short(safe)}</span> · ${ok.length ? `found on ${plural(ok.length, 'chain')}` : 'not reachable'} · <span class="muted">${ok.filter(f => f.selected).length} selected</span></div>
+        <div class="chips">${ok.map(f => html`<button class=${`pick ${f.selected ? 'on' : ''}`} aria-pressed=${f.selected} title=${`${chainName(f.chainId)} · ${fmt([f.state!.threshold, f.state!.owners.length])} · nonce ${f.state!.nonce}`} @click=${() => toggle(f)}>${chainOf(f.chainId)?.short ?? f.chainId}</button>`)}</div>
+        ${bad.length ? html`<div class="small warn">Couldn't check ${bad.map(f => html`<button class="pick" title=${f.error ?? ''} @click=${() => toggle(f)}>${chainOf(f.chainId)?.short ?? f.chainId} ↻</button>`)}</div>` : nothing}
+      </div>`
+    })}
+  </section>`
+}
+
+function ownersEditor() {
+  const base = baseOwners(), t = targetOwners()
+  if (!base.total) return html`<p class="muted">Find a Safe first; its owners show up here to edit.</p>`
+  const drift = selected().filter(f => f.state!.owners.map(a => a.toLowerCase()).sort().join() !== base.owners.map(a => a.toLowerCase()).sort().join())
+  const set = (o: string, v: string | null | undefined) => { if (v === undefined) delete S.d.edits[o.toLowerCase()]; else S.d.edits[o.toLowerCase()] = v; edited() }
+  return html`
+    <p class="muted small">Edit the list into what every Safe should have. ${base.share === base.total ? `All ${plural(base.total, 'selected Safe')} have these owners now.` : `${base.share} of ${base.total} selected Safes have these owners now.`}
+      ${drift.length ? html`<span class="warn">Different now: ${drift.map(f => chainChip(f.chainId))}. They'll be brought in line.</span>` : nothing}</p>
+    <div class="owners">${base.owners.map(o => {
+      const e = S.d.edits[o.toLowerCase()]
+      return html`<div class="owner">
+        <span class=${e === null ? 'mono gone' : 'mono'} title=${o}>${short(o)}</span>
+        ${e === undefined ? html`<span class="muted small">keeps</span><span class="actions"><button class="ghost" @click=${() => set(o, '')}>Replace</button><button class="ghost" @click=${() => set(o, null)}>Remove</button></span>`
+        : e === null ? html`<span class="bad small">removed</span><span class="actions"><button class="ghost" @click=${() => set(o, undefined)}>Undo</button></span>`
+        : html`<input class="mono" placeholder="New owner: 0x… or name.eth" .value=${live(e)} @input=${(ev: any) => { S.d.edits[o.toLowerCase()] = ev.target.value; edited() }}><span class="actions"><button class="ghost" @click=${() => set(o, undefined)}>Undo</button></span>`}
+      </div>`
+    })}
+    ${S.d.added.map((a, i) => html`<div class="owner">
+      <span class="good small">new</span>
+      <input class="mono" placeholder="0x… or name.eth" .value=${live(a)} @input=${(ev: any) => { S.d.added[i] = ev.target.value; edited() }}>
+      <span class="actions"><button class="ghost" @click=${() => { S.d.added.splice(i, 1); edited() }}>Remove</button></span>
+    </div>`)}
+    </div>
+    <div class="row">
+      <button class="ghost" @click=${() => { S.d.added.push(''); edited() }}>+ Add owner</button>
+      <span class="grow"></span>
+      <label class="check">Threshold <input class="num" type="number" min="1" max=${t.owners.length} .value=${live(String(t.threshold))} @input=${(e: any) => { S.d.threshold = Number(e.target.value) || null; edited() }}> of ${t.owners.length}</label>
+    </div>`
+}
+
+function replicateEditor() {
+  return html`
+    <p class="muted small">Build the transaction once in Safe{Wallet}'s Transaction Builder, then paste its link (or the exported JSON) here. Owner changes are redone per Safe; the source Safe's own address becomes each Safe's.</p>
+    <textarea rows="3" spellcheck="false" placeholder="https://app.safe.global/transactions/tx?safe=eth:0x…&id=multisig_…   or   { Transaction Builder JSON }"
+      .value=${live(S.d.source)} @input=${(e: any) => { S.d.source = e.target.value; S.lines = ''; edited() }}></textarea>
+    <div class="row">
+      <span class="grow small ${S.lines ? 'good' : 'muted'}">${S.lines ? `✓ Loaded: ${S.sourceNote}` : ''}</span>
+      <button @click=${loadSource} ?disabled=${!S.d.source.trim()}>Load</button>
+    </div>
+    ${S.lines ? html`<details><summary>As it will be replicated</summary><pre class="mono small wrap">${S.lines}</pre></details>` : nothing}`
+}
+
 function composeView() {
   const by = (k: string) => S.prepared.filter(p => prepKind(p) === k)
-  const ready = by('ready'), applied = by('applied'), attention = by('attention'), loading = by('loading')
+  const ready = by('ready'), synced = by('synced'), attention = by('attention'), loading = by('loading')
+  const checking = S.prepared.filter(p => p.notes.includes('checking the queue…')).length
   const labels = Object.fromEntries(Object.entries(S.names).map(([n, a]) => [a.toLowerCase(), n]))
   const prepResult = (tx: Tx) => {
     const p = S.prepared.find(p => p.tx === tx)
     return p?.state && p.owners && p.threshold !== undefined ? { before: [p.state.threshold, p.state.owners.length], after: [p.threshold, p.owners.length] } as Result : undefined
   }
+  const mode = (m: Draft['mode'], label: string) => html`<button class=${S.d.mode === m ? 'seg on' : 'seg'} aria-pressed=${S.d.mode === m} @click=${() => { S.d.mode = m; edited() }}>${label}</button>`
   return html`
+  ${safesCard()}
   <section class="card">
-    <input class="title" placeholder="Batch title, e.g. Rotate signers Q4" .value=${live(S.title)} @input=${(e: any) => { S.title = e.target.value; saveDraft() }}>
-    <div class="cols">
-      <label><span>Safes</span>
-        <textarea rows="8" spellcheck="false" placeholder=${'0xSafe… eth arb1 base oeth 252\neth:0xOtherSafe…\nhttps://app.safe.global/home?safe=gno:0x…'} .value=${live(S.targets)} @input=${(e: any) => { S.targets = e.target.value; edited() }}></textarea>
-        <small>One per line: <code>chain:0xSafe</code>, a Safe{Wallet} link, or one address followed by chains.</small>
-      </label>
-      <label><span>Change</span>
-        <textarea rows="8" spellcheck="false" placeholder=${'swap 0xOldOwner… newowner.eth\nadd 0x…   remove 0x…   threshold 4\n0xToken… transfer(address,uint256) 0xTo… 1000000\nself 0x<calldata, may contain {self}>'} .value=${live(S.actions)} @input=${(e: any) => { S.actions = e.target.value; edited() }}></textarea>
-        <small>Owner changes (<code>swap</code>, <code>add</code>, <code>remove</code>, <code>threshold</code>) are worked out per Safe. Other lines are calls; <code>self</code> means each Safe. Transaction Builder JSON works too.</small>
-      </label>
-    </div>
+    <div class="row"><span class="segs">${mode('owners', 'Owners and threshold')}${mode('replicate', 'Replicate a transaction')}</span></div>
+    ${S.d.mode === 'owners' ? ownersEditor() : replicateEditor()}
     <div class="row">
-      <input class="grow" placeholder="Or copy a queued transaction: paste its Safe{Wallet} link" .value=${live(S.importRef)} @input=${(e: any) => { S.importRef = e.target.value; update() }} @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && importTx()}>
-      <button @click=${importTx} ?disabled=${!S.importRef.trim()}>Import</button>
-    </div>
-    <div class="row">
-      <label class="check"><input type="checkbox" .checked=${S.afterQueue} @change=${(e: any) => { S.afterQueue = e.target.checked; edited() }}> Queue after transactions already pending</label>
+      <label class="check"><input type="checkbox" .checked=${S.d.afterQueue} @change=${(e: any) => { S.d.afterQueue = e.target.checked; edited() }}> Queue after transactions already pending</label>
       <span class="grow"></span>
-      <button class="primary" @click=${prepare} ?disabled=${S.preparing}>${S.preparing ? 'Preparing…' : 'Prepare'}</button>
+      <button class="primary" @click=${prepare} ?disabled=${S.preparing || !selected().length}>${S.preparing ? 'Preparing…' : `Prepare ${selected().length ? plural(selected().length, 'Safe') : ''}`}</button>
     </div>
     ${S.errors.length ? html`<div class="errors">${S.errors.map(e => html`<div>${e}</div>`)}</div>` : nothing}
   </section>
@@ -479,7 +645,7 @@ function composeView() {
   <section class="card">
     <div class="summary">
       <span class="good">✓ ${ready.length} ready</span>
-      ${applied.length ? html` · <span class="muted">${applied.length} already applied</span>` : nothing}
+      ${synced.length ? html` · <span class="muted">${synced.length} already in sync</span>` : nothing}
       ${attention.length ? html` · <span class="bad">${attention.length} need${attention.length === 1 ? 's' : ''} attention</span>` : nothing}
       ${loading.length ? html` · <span class="muted">${loading.length} reading…</span>` : nothing}
     </div>
@@ -490,21 +656,21 @@ function composeView() {
       <tbody>${S.prepared.map(p => {
         const k = prepKind(p)
         return html`<tr>
-          <td class="ico-cell">${k === 'ready' ? html`<span class="ico done">✓</span>` : k === 'applied' ? html`<span class="ico done quiet">✓</span>` : k === 'attention' ? html`<span class="ico warn">!</span>` : html`<span class="ico now"></span>`}</td>
+          <td class="ico-cell">${k === 'ready' ? html`<span class="ico done">✓</span>` : k === 'synced' ? html`<span class="ico done quiet">✓</span>` : k === 'attention' ? html`<span class="ico warn">!</span>` : html`<span class="ico now"></span>`}</td>
           <td>${chainChip(p.chainId)}</td>
           <td>${addr(p.safe, labels)}</td>
           <td>${p.tx?.nonce ?? p.state?.nonce ?? ''}</td>
-          <td>${p.state ? (p.owners && p.threshold !== undefined && (p.owners.length !== p.state.owners.length || p.threshold !== p.state.threshold) ? `${fmt([p.state.threshold, p.state.owners.length])} → ${fmt([p.threshold, p.owners.length])}` : fmt([p.state.threshold, p.state.owners.length])) : ''}</td>
+          <td class="nowrap">${p.state ? (p.owners && p.threshold !== undefined && (p.owners.length !== p.state.owners.length || p.threshold !== p.state.threshold) ? `${fmt([p.state.threshold, p.state.owners.length])} → ${fmt([p.threshold, p.owners.length])}` : fmt([p.state.threshold, p.state.owners.length])) : ''}</td>
           <td class="small">
             ${p.error ? html`<span class="bad">${p.error}</span>` : p.skip ? html`<span class="muted">${p.skip}</span>` : nothing}
             ${p.sim && !p.sim.ok && !p.sim.definite ? html`<span class="warn">${p.sim.error}</span>` : nothing}
-            ${p.notes.join('; ')}
+            <span class=${p.notes.some(n => n.startsWith('⚠')) ? 'warn' : 'muted'}>${p.notes.join('; ')}</span>
           </td>
         </tr>`
       })}</tbody>
     </table></div>
     <div class="row">
-      <span class="grow muted small">The link covers the ${plural(ready.length, 'ready Safe')}. Gas and refund fields are zero: whoever executes pays gas.</span>
+      <span class="grow muted small">The link covers the ${plural(ready.length, 'ready Safe')}.${checking ? ` Still checking ${plural(checking, 'queue')} for conflicts; signers see conflicts too.` : ''} Whoever executes pays gas.</span>
       <button class="primary" @click=${createLink} ?disabled=${S.preparing || !ready.length}>Create signing link</button>
     </div>
     ${S.link ? html`<div class="linkbox">
@@ -551,7 +717,11 @@ function progressView() {
   const loading = S.rows.some(r => status(r).kind === 'loading')
   const ready = S.rows.filter(r => status(r).kind === 'ready').length
   const executed = S.rows.filter(r => status(r).kind === 'executed').length
-  const busy = S.signing || S.executing
+  const busy = S.signing || S.executing || S.waiting
+  const pending = (r: Row) => (r.svc === 'ok' ? unshared(r) : [])
+  const uploading = S.rows.reduce((n, r) => n + pending(r).filter(s => s.uploading).length, 0)
+  const notUploaded = S.rows.reduce((n, r) => n + pending(r).filter(s => !s.uploading).length, 0)
+  const manual = S.rows.filter(r => r.svc === 'none' && needsWork(r) && Object.keys(r.sigs).length)
   const bar = html`<div class="bar"><i style=${`width:${yours.length ? Math.round((signed / yours.length) * 100) : 0}%`}></i></div>`
   const cur = S.current
   return html`
@@ -560,7 +730,7 @@ function progressView() {
       ${S.choosing ? S.wallets.map(w => html`<button @click=${() => connect(w)}><img src=${w.info.icon} alt="">${w.info.name}</button>`) : nothing}
       <span class="muted grow">Connect the wallet you sign with to see which Safes need you.</span>
     </div>`
-  : S.signing ? html`<div class="row"><b class="grow">Signing ${Math.min(signed + 1, yours.length)} of ${yours.length}</b><button @click=${() => { S.signing = false; update() }}>Pause</button></div>
+  : S.signing ? html`<div class="row"><b class="grow">Signing ${Math.min(signed + 1, yours.length)} of ${yours.length}</b><button @click=${() => stop()}>Pause</button></div>
       ${bar}
       ${cur ? html`<div class="current">
         <div><b>${chainName(cur.tx.chainId)}</b> · ${addr(cur.tx.safe)} · nonce ${cur.tx.nonce} · <span class="muted">${cur.phase ?? ''}</span></div>
@@ -570,14 +740,21 @@ function progressView() {
       </div>` : nothing}`
   : remaining ? html`<div class="row">
       <span class="grow">${addr(S.account)} · you've signed <b>${signed}</b> of ${yours.length}${loading ? html` <span class="muted">(still loading)</span>` : nothing}</span>
-      <button class="primary" @click=${signAll} ?disabled=${busy}>Sign remaining ${remaining}</button>
+      <button class="primary" @click=${signAll} ?disabled=${busy}>${S.waiting ? 'Waiting for your wallet…' : `Sign remaining ${remaining}`}</button>
     </div>${bar}`
-  : yours.length ? html`<div class="done-msg">✓ You've signed all ${yours.length}. Nothing else is needed from you.</div>${bar}`
+  : yours.length ? html`
+      ${uploading && !notUploaded && !manual.length ? html`<div class="done-msg">✓ Signing complete. <span class="muted">Uploading ${plural(uploading, 'signature')}…</span></div>`
+      : notUploaded || manual.length ? html`<div class="done-msg warn">✓ Signing complete, but ${[
+        notUploaded ? `${plural(notUploaded, 'signature')} didn't upload yet` : '',
+        manual.length ? html`${manual.map(r => chainChip(r.tx.chainId))} ${manual.length === 1 ? 'needs' : 'need'} signatures shared by hand` : '',
+      ].filter(Boolean).map((x, i) => html`${i ? ' and ' : ''}${x}`)}.</div>
+      <div class="row">${notUploaded ? html`<button @click=${refresh}>Retry upload</button>` : nothing}<button @click=${() => copy(exportSigs())}>Copy signatures to share</button></div>`
+      : html`<div class="done-msg">✓ You've signed all ${yours.length}. Nothing else is needed from you.</div>`}${bar}`
   : html`<div class="muted">${loading ? 'Checking which Safes need your signature…' : html`${addr(S.account)} has nothing to sign: it isn't an owner here, or every Safe already has enough signatures.`}</div>`}
   <div class="row small">
     <span class="grow muted">Executed <b>${executed}</b> of ${S.rows.length}${ready ? html` · <b class="good">${ready} ready to execute</b> (anyone can, and pays gas)` : nothing}</span>
     ${S.account && ready && !busy ? html`<button @click=${executeAll}>Execute ${ready}</button>` : nothing}
-    ${S.executing ? html`<button @click=${() => { S.executing = false; update() }}>Stop</button>` : nothing}
+    ${S.executing ? html`<button @click=${() => stop()}>Stop</button>` : nothing}
     <button class="ghost" @click=${refresh} ?disabled=${busy} title="Re-read the chain and the Safe service">↻ Refresh</button>
   </div>
   ${!storageOk ? html`<div class="notice">This browser can't save signatures. Keep the tab open until they're uploaded, or copy them below.</div>` : nothing}
@@ -606,28 +783,31 @@ function batchView() {
     <div class="scroll"><table><tbody>${S.rows.map(r => {
       const st = status(r)
       const link = safeLink(r.tx, r.proposed ? r.hash : undefined)
-      return html`<tr class=${`click ${r === S.current ? 'active' : ''}`} @click=${() => { r.open = !r.open; update() }}>
+      const conflict = r.others.some(o => !o.isExecuted) && needsWork(r)
+      const toggle = () => { r.open = !r.open; update() }
+      return html`<tr class=${`click ${r === S.current ? 'active' : ''}`} @click=${toggle}>
         <td class="ico-cell">${icon(r, st.kind)}</td>
         <td>${chainChip(r.tx.chainId)}</td>
         <td>${addr(r.tx.safe)}</td>
-        <td class="muted nowrap">nonce ${r.tx.nonce}</td>
+        <td class="muted nowrap nonce-cell">nonce ${r.tx.nonce}</td>
         <td class="grow-cell">
           <span class=${KIND_CLASS[st.kind]}>${r === S.current && r.phase ? r.phase : st.text}</span>
           ${r.svc === 'none' ? html` <span class="tag" title="No Safe Transaction Service on this chain: share signatures with a bundle">manual</span>` : nothing}
+          ${conflict ? html`<div class="small warn">⚠ Another transaction is also queued at nonce ${r.tx.nonce}; only one of them can execute.</div>` : nothing}
           ${r.error && st.kind !== 'unknown' ? html`<div class="small bad">${r.error}</div>` : nothing}
         </td>
-        <td class="muted">${r.open ? '▾' : '▸'}</td>
+        <td><button class="ghost disclose" aria-expanded=${!!r.open} aria-label=${`Details for ${chainName(r.tx.chainId)}`} @click=${(e: Event) => { e.stopPropagation(); toggle() }}>${r.open ? '▾' : '▸'}</button></td>
       </tr>
       ${r.open ? html`<tr class="details"><td></td><td colspan="5">
         <div class="kv">
-          <span>to</span><span class="mono">${r.tx.to}</span>
+          <span>to</span><span class="mono wrap">${r.tx.to}</span>
           <span>value</span><span class="mono">${r.tx.value}</span>
           <span>operation</span><span>${r.tx.operation === 1 ? 'DELEGATECALL (1)' : 'CALL (0)'}</span>
           <span>data</span><span class="mono wrap">${r.tx.data}</span>
           <span>gas and refund</span><span class="mono">all zero</span>
-          <span>safeTxHash</span><span class="mono">${r.hash}</span>
-          <span>domain hash</span><span class="mono">${domainHash(r.tx)}</span>
-          <span>message hash</span><span class="mono">${messageHash(r.tx)}</span>
+          <span>safeTxHash</span><span class="mono wrap">${r.hash}</span>
+          <span>domain hash</span><span class="mono wrap">${domainHash(r.tx)}</span>
+          <span>message hash</span><span class="mono wrap">${messageHash(r.tx)}</span>
           <span>signed by</span><span>${validSigs(r).map(s => html`<div>${addr(s.owner)}${r.svc === 'ok' && !s.posted ? html` <span class="warn">not uploaded</span>` : nothing}</div>`)}</span>
           ${link ? html`<span>open in</span><span><a href=${link} target="_blank" rel="noopener">${chainOf(r.tx.chainId)?.service ? 'Safe{Wallet}' : 'explorer'}</a>${r.execHash ? html` · <a href=${`${chainOf(r.tx.chainId)?.explorer}/tx/${r.execHash}`} target="_blank" rel="noopener">execution</a>` : nothing}</span>` : nothing}
         </div>
@@ -644,7 +824,7 @@ function batchView() {
     </p>
     <div class="row">
       <button @click=${() => copy(exportSigs())} ?disabled=${!toShare}>Copy ${plural(toShare, 'signature')}</button>
-      <textarea class="grow" rows="2" placeholder="Paste one or more fanout-sigs:… bundles" .value=${live(S.pasted)} @input=${(e: any) => { S.pasted = e.target.value; update() }}></textarea>
+      <textarea class="grow" rows="2" placeholder="Paste one or more safesync-sigs:… bundles" .value=${live(S.pasted)} @input=${(e: any) => { S.pasted = e.target.value; update() }}></textarea>
       <button @click=${importSigs} ?disabled=${!S.pasted.trim()}>Add</button>
     </div>
   </section>` : nothing}`
@@ -665,7 +845,7 @@ function settingsView() {
     ${S.settingsErrors.length ? html`<div class="errors">${S.settingsErrors.map(e => html`<div>${e}</div>`)}</div>` : nothing}
     <div class="row"><span class="grow"></span><button class="primary" @click=${() => {
       S.settingsErrors = applySettings()
-      if (!S.settingsErrors.length) { store.set('fanout:settings', S.settings); S.settingsOpen = false; if (S.mode === 'batch') refresh() }
+      if (!S.settingsErrors.length) { store.set('safesync:settings', S.settings); S.settingsOpen = false; if (S.mode === 'batch') refresh() }
       update()
     }}>Save</button></div>
     <details><summary>Supported chains (${CHAINS.length})</summary>
@@ -677,8 +857,8 @@ function settingsView() {
 function view(): TemplateResult {
   return html`
   <header>
-    <a class="brand" href=${location.pathname + location.search} @click=${(e: Event) => { if (S.mode === 'batch') { e.preventDefault(); history.pushState(null, '', location.pathname + location.search); S.mode = 'compose'; update() } }}>Fanout</a>
-    <span class="muted small grow">one change, many Safes, one signing pass</span>
+    <a class="brand" href=${location.pathname + location.search} @click=${(e: Event) => { if (S.mode === 'batch') { e.preventDefault(); history.pushState(null, '', location.pathname + location.search); S.mode = 'compose'; update() } }}>Safe Sync</a>
+    <span class="muted small grow">keep a Safe the same on every chain</span>
     <button class="ghost" @click=${() => { S.settingsOpen = true; update() }}>Settings</button>
   </header>
   <main>${S.mode === 'batch' ? batchView() : composeView()}</main>
@@ -688,9 +868,13 @@ function view(): TemplateResult {
 function route() {
   const h = location.hash.slice(1)
   if (h) openBatch(h)
-  else { S.mode = 'compose'; update() }
+  else {
+    S.mode = 'compose'; update()
+    if (S.d.safes && !S.found.length && !S.finding) find()
+    if (S.d.mode === 'replicate' && S.d.source && !S.lines) loadSource()
+  }
 }
 window.addEventListener('hashchange', route)
 // Signatures are kept in localStorage and re-uploaded on the next visit; only warn mid-session.
-window.addEventListener('beforeunload', e => { if (S.signing || S.executing) e.preventDefault() })
+window.addEventListener('beforeunload', e => { if (S.signing || S.executing || S.waiting) e.preventDefault() })
 route()

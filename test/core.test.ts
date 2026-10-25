@@ -2,8 +2,8 @@ import { expect, test } from 'bun:test'
 import { getAddress, hashTypedData, type Address, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import {
-  batchId, buildCalls, decodeBatch, describe, encodeBatch, linesFromTx, normalizeSig, packMultiSend, packSigs, parseActions,
-  parseTargets, payloadKey, safeTxHash, sigOwner, unpackMultiSend, walletTypedData, type Tx,
+  batchId, buildCalls, decodeBatch, describe, encodeBatch, linesFromTx, linesFromTxBuilder, normalizeSig, packMultiSend, packSigs,
+  parseActions, parseTargets, payloadKey, safeTxHash, sigOwner, unpackMultiSend, walletTypedData, type Tx,
 } from '../src/safe'
 
 // Real proposal queued in Safe{Wallet} (Transaction Builder) on 2026-10-25 for the plan's rotation example.
@@ -121,4 +121,43 @@ test('batch link round-trips and stores identical payloads once', async () => {
 test('signatures are packed in ascending owner order, threshold only', () => {
   const sigs = ['0x3', '0x1', '0x2'].map(o => ({ owner: getAddress(o.padEnd(42, '0')), sig: `0x${o.slice(2).repeat(130)}` as Hex }))
   expect(packSigs(sigs, 2)).toBe(`0x${'1'.repeat(130)}${'2'.repeat(130)}`)
+})
+
+test('sync to a target owner list: the edited rotation reproduces the Safe{Wallet} proposal exactly', () => {
+  const target = OWNERS.map(o => (o === OWNERS[4] ? 'winthorpe.eth' : o === OWNERS[0] ? '0x4046B37Ffc36B0C723d7Fc64e0C763B698D81934' : o))
+  const sync = { kind: 'sync' as const, owners: target, threshold: 5, replace: [[OWNERS[4], 'winthorpe.eth'], [OWNERS[0], '0x4046B37Ffc36B0C723d7Fc64e0C763B698D81934']] as [string, string][] }
+  const b = buildCalls([sync], ORIGINAL, { version: '1.3.0', owners: OWNERS, threshold: 5, nonce: 13 }, NAMES)
+  expect(packMultiSend(b.calls)).toBe(DATA)
+})
+
+test('sync fixes drift per Safe and leaves Safes already in sync alone', () => {
+  const [a, b, c, d, e, x] = ['0xa', '0xb', '0xc', '0xd', '0xe', '0xf'].map(v => getAddress(v.padEnd(42, '1')))
+  const sync = { kind: 'sync' as const, owners: [a, b, e], threshold: 2, replace: [[c, e]] as [string, string][] }
+  // Already at the target: nothing to do.
+  expect(buildCalls([sync], a, { version: '1.3.0', owners: [e, a, b], threshold: 2, nonce: 0 }, {}).calls).toHaveLength(0)
+  // The usual case: one replacement.
+  const usual = buildCalls([sync], a, { version: '1.3.0', owners: [a, b, c], threshold: 2, nonce: 0 }, {})
+  expect(usual.calls.map(k => k.data.slice(0, 10))).toEqual(['0xe318b52b'])
+  expect(usual.owners).toEqual([a, b, e])
+  // Drifted: an extra owner x and a missing owner b. x pairs with e? No: c→e as asked, x→b, d removed.
+  const drift = buildCalls([sync], a, { version: '1.3.0', owners: [a, c, x, d], threshold: 3, nonce: 0 }, {})
+  expect(new Set(drift.owners)).toEqual(new Set([a, b, e]))
+  expect(drift.threshold).toBe(2)
+  expect(drift.calls.map(k => k.data.slice(0, 10))).toEqual(['0xe318b52b', '0xe318b52b', '0xf8dc5dd9', '0x694e80c3'].slice(0, drift.calls.length))
+  expect(() => buildCalls([{ ...sync, owners: [a, a] }], a, { version: '1.3.0', owners: [a], threshold: 1, nonce: 0 }, {})).toThrow('duplicate')
+  expect(() => buildCalls([{ ...sync, threshold: 4 }], a, { version: '1.3.0', owners: [a, b, c], threshold: 2, nonce: 0 }, {})).toThrow('invalid')
+})
+
+test('a Transaction Builder JSON goes through the same owner-change conversion as a queued transaction', () => {
+  const json = {
+    meta: { createdFromSafeAddress: ORIGINAL },
+    transactions: [
+      { to: ORIGINAL, value: '0', data: null, contractMethod: { name: 'swapOwner', inputs: [{ name: 'prevOwner', type: 'address' }, { name: 'oldOwner', type: 'address' }, { name: 'newOwner', type: 'address' }] },
+        contractInputsValues: { prevOwner: OWNERS[3], oldOwner: OWNERS[4], newOwner: NAMES['winthorpe.eth'] } },
+      { to: '0x1111111111111111111111111111111111111111', value: '0', data: `0xabcdef00${ORIGINAL.slice(2)}` },
+    ],
+  }
+  const lines = linesFromTxBuilder(json)
+  expect(lines.split('\n')).toEqual([`swap ${OWNERS[4]} ${NAMES['winthorpe.eth']}`, '0x1111111111111111111111111111111111111111 0xabcdef00{self}'])
+  expect(parseActions(JSON.stringify(json)).actions[0]).toEqual({ kind: 'swap', old: OWNERS[4], new: NAMES['winthorpe.eth'] })
 })
