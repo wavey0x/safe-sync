@@ -1,0 +1,18 @@
+{
+  "name": "fanout",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "dev": "bun scripts/build.ts --serve",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "lit-html": "3.3.1",
+    "viem": "2.38.3"
+  },
+  "devDependencies": {
+    "@types/bun": "1.2.23",
+    "typescript": "5.9.3"
+  }
+}
