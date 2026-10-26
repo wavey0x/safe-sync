@@ -70,7 +70,7 @@ const S = {
   batch: null as Batch | null, id: '', rows: [] as Row[], loadError: '', pasted: '',
   wallets: [] as Wallet[], provider: null as any, account: null as Address | null, choosing: false,
   delegations: {} as Record<string, DelegationLookup>, // keyed "account:chainId"
-  signing: false, executing: false, waiting: false, current: null as Row | null, open: new Set<string>(), copiedSafe: null as { key: string; ok: boolean } | null, notice: '', copied: '' as '' | 'yes' | 'failed',
+  signing: false, executing: false, waiting: false, current: null as Row | null, open: new Set<string>(), notice: '', copied: '' as '' | 'yes' | 'failed',
   settingsOpen: false, settingsErrors: [] as string[], settings: store.get('safesync:settings', { rpc: '', service: '', apiKey: '' }),
 }
 
@@ -98,9 +98,14 @@ function showTip(el: Element | null) {
   tip.classList.toggle('on', !!text)
   if (!tipFor || !text) return
   tip.textContent = text
-  const a = tipFor.getBoundingClientRect(), t = tip.getBoundingClientRect(), above = a.top - t.height - 6
-  tip.style.left = `${Math.min(Math.max(8, a.left + a.width / 2 - t.width / 2), innerWidth - t.width - 8)}px`
-  tip.style.top = `${above >= 8 ? above : a.bottom + 6}px`
+  tip.classList.toggle('mono', /^0x[0-9a-f]+$/i.test(text)) // addresses and hashes, in full on one line
+  const a = tipFor.getBoundingClientRect(), t = tip.getBoundingClientRect(), above = a.top - t.height - 8
+  const left = Math.min(Math.max(8, a.left + a.width / 2 - t.width / 2), innerWidth - t.width - 8)
+  tip.style.left = `${left}px`
+  tip.style.top = `${above >= 8 ? above : a.bottom + 8}px`
+  // The pointer stays on the element even when the tooltip is pushed in from the viewport's edge.
+  tip.dataset.side = above >= 8 ? 'above' : 'below'
+  tip.style.setProperty('--pointer', `${Math.min(Math.max(10, a.left + a.width / 2 - left), t.width - 10)}px`)
 }
 const tipTarget = (e: Event) => (e.target instanceof Element ? e.target.closest('[data-tip]') : null)
 document.addEventListener('pointerover', e => showTip(tipTarget(e)))
@@ -678,27 +683,43 @@ function copy(text: string) {
     () => { S.notice = "Couldn't copy: clipboard access was blocked"; update() },
   )
 }
-const addr = (a: string, labels: Record<string, string> = S.batch?.labels ?? {}) =>
-  html`<span class="mono" data-tip=${a}>${short(a)}</span>${labels[a.toLowerCase()] ? html` <span class="label">${labels[a.toLowerCase()]}</span>` : nothing}`
+/**
+ * A copy button that answers with a check (or turns red) for a moment. The feedback lives on the button itself, so only
+ * the one clicked answers, wherever else the same address shows.
+ */
+function copyButton(text: string, label = 'Copy address') {
+  const click = (e: Event) => {
+    e.stopPropagation() // rows open and close on click
+    const b = e.currentTarget as HTMLElement
+    const answer = (ok: boolean) => {
+      b.classList.remove('ok', 'failed'); void b.offsetWidth // restart the check's animation on a second click
+      b.classList.add(ok ? 'ok' : 'failed'); b.dataset.tip = ok ? 'Copied' : "Couldn't copy"; showTip(b)
+      clearTimeout(Number(b.dataset.timer))
+      b.dataset.timer = String(setTimeout(() => { b.classList.remove('ok', 'failed'); b.dataset.tip = label; if (tipFor === b) showTip(b) }, 1500))
+    }
+    navigator.clipboard.writeText(text).then(() => answer(true), () => answer(false))
+  }
+  return html`<button class="ghost copy" aria-label=${label} data-tip=${label} @click=${click}>
+    <svg class="copy-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V4A1.5 1.5 0 0 0 9 2.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5"/></svg>
+    <svg class="check-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-6.5"/></svg>
+  </button>`
+}
+/** An address: short, the full one in its tooltip, with a copy button and its label (an ENS name) if it has one. */
+const addr = (a: string, labels: Record<string, string> = S.batch?.labels ?? {}, cls = 'mono') =>
+  html`<span class="addr"><span class=${cls} data-tip=${a}>${short(a)}</span>${copyButton(a)}</span>${labels[a.toLowerCase()] ? html` <span class="label">${labels[a.toLowerCase()]}</span>` : nothing}`
 const chainChip = (id: number) => html`<span class="chip" data-tip=${chainName(id)}>${chainOf(id)?.short ?? id}</span>`
 const safeLink = (tx: { chainId: number; safe: string }, hash?: string) => {
   const c = chainOf(tx.chainId), s = c?.service
   if (s) return `${s.app}/${hash ? `transactions/tx?safe=${s.prefix}:${tx.safe}&id=multisig_${tx.safe}_${hash}` : `home?safe=${s.prefix}:${tx.safe}`}`
   return c?.explorer ? `${c.explorer}/address/${tx.safe}` : undefined
 }
-/** A Safe's address in a list: opens the Safe in Safe{Wallet} (or the explorer), with a copy button that answers with a check. */
+/** A Safe's address in a list: opens the Safe in Safe{Wallet} (or the explorer), with a copy button. */
 function safeAddr(chainId: number, safe: string, labels: Record<string, string>) {
-  const link = safeLink({ chainId, safe }), key = keyOf({ chainId, safe }), c = S.copiedSafe?.key === key ? S.copiedSafe : null
-  const stop = (e: Event) => e.stopPropagation() // the row itself opens and closes
-  const copied = (ok: boolean) => { S.copiedSafe = { key, ok }; update(); setTimeout(() => { if (S.copiedSafe?.key === key) (S.copiedSafe = null), update() }, 1500) }
-  return html`<span class="safe-addr">
-    ${link ? html`<a class="mono" href=${link} target="_blank" rel="noopener" data-tip=${safe} @click=${stop}>${short(safe)}</a>` : html`<span class="mono" data-tip=${safe}>${short(safe)}</span>`}
+  const link = safeLink({ chainId, safe })
+  return html`<span class="addr">
+    ${link ? html`<a class="mono" href=${link} target="_blank" rel="noopener" data-tip=${safe} @click=${(e: Event) => e.stopPropagation()}>${short(safe)}</a>` : html`<span class="mono" data-tip=${safe}>${short(safe)}</span>`}
+    ${copyButton(safe)}
     ${labels[safe.toLowerCase()] ? html`<span class="label">${labels[safe.toLowerCase()]}</span>` : nothing}
-    <button class=${`ghost copy ${c ? (c.ok ? 'ok' : 'failed') : ''}`} data-tip=${c ? (c.ok ? 'Copied' : "Couldn't copy") : 'Copy address'} aria-label=${c?.ok ? 'Copied' : 'Copy address'}
-      @click=${(e: Event) => { stop(e); navigator.clipboard.writeText(safe).then(() => copied(true), () => copied(false)) }}>
-      ${c?.ok ? html`<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-6.5"/></svg>`
-      : html`<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V4A1.5 1.5 0 0 0 9 2.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5"/></svg>`}
-    </button>
   </span>`
 }
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
@@ -862,12 +883,12 @@ function ownersEditor() {
         if (f) { setReference(f); changed() }
       }}>
         ${!references.some(f => keyOf(f) === S.d.startedFrom) ? html`<option value=${S.d.startedFrom} selected disabled>${S.looking.size ? 'Loading reference…' : S.d.startedFrom ? 'Saved reference (unavailable)' : 'Choose a Safe'}</option>` : nothing}
-        ${references.map(f => html`<option value=${keyOf(f)} .selected=${keyOf(f) === S.d.startedFrom}>${chainName(f.chainId)} · ${short(f.safe)} · ${fmt([f.state!.threshold, f.state!.owners.length])}${f.selected ? '' : ' (excluded)'}</option>`)}
+        ${references.map(f => html`<option value=${keyOf(f)} .selected=${keyOf(f) === S.d.startedFrom}>${chainName(f.chainId)} | ${short(f.safe)} | ${fmt([f.state!.threshold, f.state!.owners.length])}${f.selected ? '' : ' (excluded)'}</option>`)}
       </select></span></label>
       <div class="muted small">Changing reference copies its owners and threshold, replacing your edits. Your edited setup applies to all selected Safes.</div>
     </div>
     <div class="owners">${S.d.owners.map((r, i) => r.from ? html`<div class="owner">
-        <span class=${r.to === null ? 'mono gone' : 'mono'} data-tip=${r.from}>${short(r.from)}</span>
+        <span>${addr(r.from, {}, r.to === null ? 'mono gone' : 'mono')}</span>
         ${r.to === r.from ? html`<span></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: '', at: Date.now() })}>Swap</button><button class="ghost" @click=${() => set(i, { to: null })}>Remove</button></span>`
         : r.to === null ? html`<span></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: r.from, at: undefined })}>Undo</button></span>`
         : html`<span class="swap"><span class="muted">→</span><input class="mono" placeholder="New owner (0x… or name.eth)" .value=${live(r.to)} @input=${(ev: any) => { r.to = ev.target.value; changed() }}></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: r.from, at: undefined })}>Undo</button></span>`}
@@ -930,8 +951,8 @@ function nonceSelect(p: Prep) {
   const choice = choiceOf(p), after = pickNonce({ ...p.tx!, nonce: p.state!.nonce }, p.queue!, 'after').nonce
   return html`<span class=${`select small ${choice === 'replace' ? 'warn' : ''}`} @click=${(e: Event) => e.stopPropagation()}>
     <select aria-label=${`Nonce on ${chainName(p.chainId)}`} @change=${(e: any) => chooseNonce(p, e.target.value)}>
-      <option value="after" .selected=${choice === 'after'}>Nonce ${after} · after ${p.queue!.length} queued</option>
-      <option value="replace" .selected=${choice === 'replace'}>Nonce ${p.state!.nonce} · replace</option>
+      <option value="after" .selected=${choice === 'after'}>Nonce ${after} | after ${p.queue!.length} queued</option>
+      <option value="replace" .selected=${choice === 'replace'}>Nonce ${p.state!.nonce} | replace</option>
     </select>
   </span>`
 }
@@ -963,7 +984,7 @@ function reviewStage() {
         <td>${chainChip(p.chainId)}</td>
         <td>${safeAddr(p.chainId, p.safe, labels)}</td>
         <td class="grow-cell small">
-          ${p.error ? html`<span class="bad">${p.error}</span> <button class="ghost retry" aria-label="Try again" @click=${(e: Event) => { e.stopPropagation(); retryPrepare(i) }}>↻</button>` : p.skip ? html`<span class="muted">${p.skip}</span>` : nothing}
+          ${p.error ? html`<span class="bad">${p.error}</span> <button class="ghost retry" aria-label="Try again" @click=${(e: Event) => { e.stopPropagation(); retryPrepare(i) }}>↻</button>` : nothing}
           ${p.same ? html`<span class="muted">already queued; its signatures count</span>` : nothing}
           ${only ? html`<span>${only}</span>` : nothing}
           ${p.sim && !p.sim.ok && !p.sim.definite ? html`<span class="warn">${p.sim.error}</span>` : nothing}
@@ -1119,7 +1140,7 @@ function batchView() {
         ${actionsView(r.tx, b.labels)}
         <div class="kv">
           <span>nonce</span><span class="mono">${r.tx.nonce}</span>
-          <span>to</span><span class="mono wrap">${r.tx.to}</span>
+          <span>to</span><span><span class="mono wrap">${r.tx.to}</span>${copyButton(r.tx.to)}</span>
           <span>value</span><span class="mono">${r.tx.value}</span>
           <span>operation</span><span>${r.tx.operation === 1 ? 'DELEGATECALL (1)' : 'CALL (0)'}</span>
           <span>data</span><span class="mono wrap">${r.tx.data} <a href=${`https://safe.swiss-knife.xyz/calldata-decoder?calldata=${encodeURIComponent(r.tx.data)}`} target="_blank" rel="noopener noreferrer" title="Decode in Swiss Knife" aria-label="Decode in Swiss Knife">↗</a></span>

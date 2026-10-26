@@ -2,10 +2,12 @@
   --bg: #f6f7f9; --card: #fff; --fg: #15181d; --muted: #6b7280; --line: #e3e6ea; --accent: #0f7b5f; --accent-fg: #fff;
   --good: #0f7b5f; --bad: #c0362c; --warn: #a15c00; --chip: #eef1f4; --active: #eaf6f1;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --tip-bg: #1d2127; --tip-fg: #f1f3f5; --tip-line: transparent;
 }
 @media (prefers-color-scheme: dark) {
   :root { --bg: #0f1114; --card: #171a1f; --fg: #e6e8eb; --muted: #8b93a1; --line: #2a2f37; --accent: #3ccf9f; --accent-fg: #06261c;
-    --good: #3ccf9f; --bad: #ff7a6e; --warn: #f0b45a; --chip: #232830; --active: #13261f; }
+    --good: #3ccf9f; --bad: #ff7a6e; --warn: #f0b45a; --chip: #232830; --active: #13261f;
+    --tip-bg: #262b33; --tip-fg: #e6e8eb; --tip-line: #363d47; }
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
@@ -83,14 +85,16 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .owner .actions { display: flex; gap: 2px; }
 .owner .actions button { padding: 4px 8px; font-weight: 500; }
 .gone { text-decoration: line-through; color: var(--muted); }
-.safe-addr { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; }
-.safe-addr a { color: inherit; text-decoration: underline dotted var(--line); text-underline-offset: 3px; }
-.safe-addr a:hover { color: var(--accent); text-decoration-color: currentColor; }
-.copy { padding: 3px; display: inline-grid; place-items: center; }
+/* An address: short form, then a quiet copy button that turns into a drawn check */
+.addr { display: inline-flex; align-items: center; gap: 1px; white-space: nowrap; vertical-align: middle; }
+.addr a { color: inherit; text-decoration: underline dotted var(--line); text-underline-offset: 3px; }
+.addr a:hover { color: var(--accent); text-decoration-color: currentColor; }
+.copy { padding: 2px; border: 0; display: inline-grid; place-items: center; color: color-mix(in srgb, var(--muted) 70%, transparent); vertical-align: middle; }
 .copy:hover:not(:disabled) { border-color: transparent; } .copy:not(.ok, .failed):hover { color: var(--fg); }
-.copy svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.copy svg { grid-area: 1 / 1; width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.copy .check-icon, .copy.ok .copy-icon { visibility: hidden; } .copy.ok .check-icon { visibility: visible; }
 .copy.ok { color: var(--good); } .copy.failed { color: var(--bad); }
-.copy.ok path { stroke-dasharray: 14; stroke-dashoffset: 14; animation: draw .3s ease-out forwards; }
+.copy.ok .check-icon path { stroke-dasharray: 14; stroke-dashoffset: 14; animation: draw .3s ease-out forwards; }
 @keyframes draw { to { stroke-dashoffset: 0; } }
 .segs { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; padding: 2px; gap: 2px; }
 .seg { border: 0; background: transparent; color: var(--muted); padding: 6px 12px; }
@@ -130,7 +134,7 @@ pre { margin: 6px 0 0; white-space: pre-wrap; }
 .ico.pending.failed { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
 @keyframes pop { 0% { transform: scale(.3); } 70% { transform: scale(1.2); } 100% { transform: scale(1); } }
 @keyframes spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .ico, .bar i, .spin { animation: none !important; transition: none; } .copy.ok path { animation: none; stroke-dasharray: none; } }
+@media (prefers-reduced-motion: reduce) { .ico, .bar i, .spin { animation: none !important; transition: none; } .copy.ok .check-icon path { animation: none; stroke-dasharray: none; } }
 
 /* Waiting: a spinner on the blocked button, or a quiet line for background work */
 .spin { display: inline-block; flex: none; width: 12px; height: 12px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; }
@@ -139,10 +143,17 @@ pre { margin: 6px 0 0; white-space: pre-wrap; }
 button:disabled:has(.spin) { opacity: .75; cursor: progress; }
 
 /* Tooltips: one element, placed by app.ts above (or below) whatever [data-tip] is hovered or focused */
-.tip { position: fixed; left: 0; top: 0; z-index: 30; max-width: min(320px, calc(100vw - 16px)); padding: 6px 9px; border-radius: 7px;
-  background: var(--fg); color: var(--bg); font: 500 12px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; overflow-wrap: anywhere;
-  box-shadow: 0 4px 14px rgba(0,0,0,.18); pointer-events: none; visibility: hidden; }
+.tip { position: fixed; left: 0; top: 0; z-index: 30; max-width: min(300px, calc(100vw - 16px)); padding: 6px 10px; border-radius: 8px;
+  background: var(--tip-bg); color: var(--tip-fg); border: 1px solid var(--tip-line); font: 500 12px/1.45 system-ui, -apple-system, Segoe UI, sans-serif;
+  overflow-wrap: anywhere; box-shadow: 0 6px 20px rgba(0,0,0,.22); pointer-events: none; visibility: hidden; }
 .tip.on { visibility: visible; }
+/* Addresses and hashes: monospace, in full on one line when the viewport allows */
+.tip.mono { max-width: calc(100vw - 16px); font: 500 11.5px/1.45 var(--mono); letter-spacing: -.01em; }
+/* A small pointer toward the element, drawn as a rotated square in the tooltip's own colours */
+.tip::after { content: ''; position: absolute; left: var(--pointer, 50%); width: 8px; height: 8px; background: inherit;
+  border: inherit; border-width: 0 1px 1px 0; transform: translateX(-50%) rotate(45deg); }
+.tip[data-side=above]::after { bottom: -5px; }
+.tip[data-side=below]::after { top: -5px; transform: translateX(-50%) rotate(225deg); }
 
 /* Tables */
 .scroll { overflow-x: auto; }
