@@ -359,7 +359,7 @@ threshold ${o[2]}`;if(n==="changeThreshold")return`threshold ${o[0]}`}catch{}ret
           <span>to</span><span class="mono wrap">${s.tx.to}</span>
           <span>value</span><span class="mono">${s.tx.value}</span>
           <span>operation</span><span>${s.tx.operation===1?"DELEGATECALL (1)":"CALL (0)"}</span>
-          <span>data</span><span class="mono wrap">${s.tx.data}</span>
+          <span>data</span><span class="mono wrap">${s.tx.data} <a href=${`https://safe.swiss-knife.xyz/calldata-decoder?calldata=${encodeURIComponent(s.tx.data)}`} target="_blank" rel="noopener noreferrer" title="Decode in Swiss Knife" aria-label="Decode in Swiss Knife">↗</a></span>
           <span>gas and refund</span><span class="mono">all zero</span>
           <span>safeTxHash</span><span class="mono wrap">${s.hash}</span>
           <span>domain hash</span><span class="mono wrap">${gd(s.tx)}</span>
