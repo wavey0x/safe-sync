@@ -28,6 +28,7 @@ type Row = {
   loaded?: Promise<void>; posting?: Promise<void>
 }
 type Wallet = { info: { name: string; icon: string; rdns: string }; provider: any }
+type DelegationLookup = { data?: svc.Delegation[]; promise: Promise<void> }
 /** What the proposer entered. Also stored in the link, so "edit as new batch" can bring it back. */
 /** One owner in the target: `from` is who it started as (none for an added owner), `to` who it becomes (null: removed). */
 type OwnerRow = { from?: string; to: string | null; at?: number } // at: when it was replaced, so replacements keep that order
@@ -68,7 +69,7 @@ const S = {
   preparing: false, prepared: [] as Prep[], errors: [] as string[], names: {} as Record<string, Address>, link: '',
   batch: null as Batch | null, id: '', rows: [] as Row[], loadError: '', pasted: '',
   wallets: [] as Wallet[], provider: null as any, account: null as Address | null, choosing: false,
-  delegations: {} as Record<string, svc.Delegation[]>, lookingUp: 0, // keyed "account:chainId"
+  delegations: {} as Record<string, DelegationLookup>, // keyed "account:chainId"
   signing: false, executing: false, waiting: false, current: null as Row | null, open: new Set<string>(), copiedSafe: null as { key: string; ok: boolean } | null, notice: '', copied: '' as '' | 'yes' | 'failed',
   settingsOpen: false, settingsErrors: [] as string[], settings: store.get('safesync:settings', { rpc: '', service: '', apiKey: '' }),
 }
@@ -444,22 +445,25 @@ function postProposal(r: Row, from: Address, sig: Hex | null) {
 // Proposers are the delegates an owner named in Safe{Wallet}: they propose signed, and their signature never counts.
 // Anyone else proposes unsigned. Looked up once per account and chain, only where the account might propose; a failed
 // lookup counts as "not a proposer", so proposing still works (unsigned).
-const lookups = new Set<string>()
+const needsDelegations = (r: Row, a: Address) => r.svc === 'ok' && (!r.proposed || r.trusted === false) && !isOwner(r, a) && needsWork(r)
+function lookupDelegations(chainId: number, account: Address): DelegationLookup {
+  const key = `${account}:${chainId}`
+  if (S.delegations[key]) return S.delegations[key]
+  const lookup: DelegationLookup = {
+    promise: svc.delegations(chainId, account).then(data => { lookup.data = data }, e => {
+      lookup.data = []; S.notice = `Couldn't check proposers on ${chainName(chainId)}, so proposals there go up unsigned: ${msg(e)}`
+    }).finally(update),
+  }
+  S.delegations[key] = lookup
+  return lookup
+}
 function findDelegations() {
   const a = S.account
   if (!a) return
-  for (const r of S.rows) {
-    const k = `${a}:${r.tx.chainId}`
-    if (lookups.has(k) || r.svc !== 'ok' || (r.proposed && r.trusted !== false) || isOwner(r, a) || !needsWork(r)) continue
-    lookups.add(k); S.lookingUp++
-    svc.delegations(r.tx.chainId, a).then(d => void (S.delegations[k] = d), e => {
-      S.delegations[k] = []; S.notice = `Couldn't check proposers on ${chainName(r.tx.chainId)}, so proposals there go up unsigned: ${msg(e)}`
-    })
-      .finally(() => { S.lookingUp--; update() })
-  }
+  for (const r of S.rows) if (needsDelegations(r, a)) lookupDelegations(r.tx.chainId, a)
 }
 // As the service decides: for this Safe or all of the delegator's, named by a current owner, not expired.
-const isDelegate = (r: Row, a: Address) => !!S.delegations[`${a}:${r.tx.chainId}`]?.some(d =>
+const isDelegate = (r: Row, a: Address) => !!S.delegations[`${a}:${r.tx.chainId}`]?.data?.some(d =>
   (!d.safe || d.safe.toLowerCase() === r.tx.safe.toLowerCase()) && isOwner(r, d.delegator) && (!d.expiryDate || Date.parse(d.expiryDate) > Date.now()))
 
 const isOwner = (r: Row, a?: Address | null) => !!a && !!r.owners?.some(o => o.toLowerCase() === a.toLowerCase())
@@ -486,7 +490,7 @@ const canSign = (r: Row) => isOwner(r, S.account) && !mine(r) && status(r).kind 
  * Not an owner, and we know whether the account proposes signed (a proposer) or unsigned. Unproposed, or proposed only
  * unsigned: a proposer's signed proposal of the same transaction makes it trusted.
  */
-const canPropose = (r: Row) => !!S.account && r.svc === 'ok' && !r.proposing && !isOwner(r, S.account) && !!S.delegations[`${S.account}:${r.tx.chainId}`]
+const canPropose = (r: Row) => !!S.account && r.svc === 'ok' && !r.proposing && !isOwner(r, S.account) && !!S.delegations[`${S.account}:${r.tx.chainId}`]?.data
   && (!r.proposed || (r.trusted === false && isDelegate(r, S.account))) && status(r).kind === 'collecting'
 const proposedByMe = (r: Row) => !!S.account && !isOwner(r, S.account) && (!!r.proposing || r.proposer?.toLowerCase() === S.account.toLowerCase())
 
@@ -547,7 +551,13 @@ async function signAll() {
     if (stopped()) break
     if (loadingRow(r)) { S.current = r; r.phase = 'waiting for this Safe to load'; update() }
     await r.loaded
+    if (stopped()) break
+    if (needsDelegations(r, account)) {
+      S.current = r; r.phase = 'checking proposer access'; update()
+      await lookupDelegations(r.tx.chainId, account).promise
+    }
     r.phase = undefined
+    if (stopped()) break
     if (!todo(r)) continue
     S.current = r
     try {
@@ -644,7 +654,7 @@ async function importSigs() {
 }
 
 function refresh() {
-  lookups.clear()
+  S.delegations = {}
   for (const r of S.rows) { r.error = r.uploadError = undefined; r.svc = 'loading'; r.loaded = loadRow(r) }
   update()
 }
@@ -991,7 +1001,7 @@ function icon(r: Row, st: ReturnType<typeof status>) {
   if (r.uploadError) return mark('pending failed', r.uploadError)
   if (r.error) return mark('warn', r.error, '!')
   if (loadingRow(r)) return mark('load', 'Reading this Safe…')
-  if (S.account && !isOwner(r, S.account) && lookups.has(`${S.account}:${r.tx.chainId}`) && !S.delegations[`${S.account}:${r.tx.chainId}`]) return mark('load', 'Checking whether you can propose this…')
+  if (S.account && !isOwner(r, S.account) && S.delegations[`${S.account}:${r.tx.chainId}`] && !S.delegations[`${S.account}:${r.tx.chainId}`].data) return mark('load', 'Checking whether you can propose this…')
   if (!S.account) return mark('todo quiet', 'Connect a wallet to see what you can do here')
   if (r.proposing || (mine(r) && r.sigs[S.account.toLowerCase()].uploading)) return mark('pending', 'Uploading to the Safe service…')
   if (mine(r)) return mark('done', 'You signed this', '✓')
@@ -1017,7 +1027,8 @@ function progressView() {
   const finished = both ? `Signed ${signs.length}, proposed ${proposals.length}` : `${proposals.length ? 'Proposed' : 'Signed'} all ${yours.length}`
   const unsigned = S.account ? proposals.filter(r => !proposedByMe(r) && !isDelegate(r, S.account!)).length : 0
   const reading = S.rows.filter(loadingRow).length, read = S.rows.length - reading
-  const waitText = reading ? `Reading Safes · ${read} of ${S.rows.length}` : S.lookingUp ? 'Checking proposer access…' : ''
+  const lookingUp = S.account && S.rows.some(r => { const lookup = S.delegations[`${S.account}:${r.tx.chainId}`]; return lookup && !lookup.data })
+  const waitText = reading ? `Reading Safes · ${read} of ${S.rows.length}` : lookingUp ? 'Checking proposer access…' : ''
   // Nothing to do yet and still reading: that blocks the action, so its button says so (and the quiet line stays out).
   const blocked = !!S.account && !S.signing && !yours.length && !!waitText
   const ready = S.rows.filter(r => status(r).kind === 'ready').length
