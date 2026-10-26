@@ -278,6 +278,8 @@ export function startMockService(opts: MockOptions) {
           const [status, data] = await confirm(r[1], body)
           return reply(status, data)
         }
+        // Settings checks this to tell a Safe Transaction Service from any other URL.
+        if (req.method === 'GET' && path === '/v1/about/') return reply(200, { name: 'Safe Transaction Service', version: '6.13.0', api_version: 'v1', secure: false, host: url.host })
         if (req.method === 'GET' && path === '/v2/delegates/') {
           // DelegateListFilter: needs at least one filter; expired delegations are listed too.
           const q = url.searchParams, filters = (['safe', 'delegate', 'delegator', 'label'] as const).filter(k => q.get(k))
