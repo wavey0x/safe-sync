@@ -59,6 +59,7 @@ button:disabled { opacity: .45; cursor: default; }
 .errors { color: var(--bad); display: grid; gap: 2px; }
 .notice { color: var(--warn); }
 .summary { font-size: 15px; font-weight: 600; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.stack { display: grid; gap: 4px; justify-items: start; }
 .spaced { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; } .aside { margin-left: 10px; } /* space, not dots, between parts */
 .nowrap { white-space: nowrap; }
 .chip + .chip { margin-left: 4px; }
@@ -382,9 +383,10 @@ threshold ${o[2]}`;if(n==="changeThreshold")return`threshold ${o[0]}`}catch{}ret
       ${N.length?y`<button @click=${()=>Ow(Rw())}>Copy signatures for ${N.map((C)=>Ei(C.tx.chainId))}</button>`:R}
     </div>${H}`:A?R:y`<div class="muted">${l?"Nothing left for you to sign":"Not an owner of these Safes"}</div>`}
   <div class="row small">
-    <span class="muted">Executed ${x} of ${p.rows.length}</span>
-    ${g?Dw(g):R}
-    <span class="grow"></span>
+    <div class="grow stack">
+      ${g?Dw(g):R}
+      <span class="muted">Executed ${x} of ${p.rows.length}</span>
+    </div>
     ${p.account&&v&&!w?y`<button @click=${Nw}>Execute ${v}</button>`:R}
     ${p.executing?y`<button @click=${()=>Fn()}>Stop</button>`:R}
     <button class="ghost" aria-label="Refresh" data-tip="Read every Safe again" @click=${Ld} ?disabled=${w}>↻</button>

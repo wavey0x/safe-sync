@@ -52,6 +52,7 @@ button:disabled { opacity: .45; cursor: default; }
 .errors { color: var(--bad); display: grid; gap: 2px; }
 .notice { color: var(--warn); }
 .summary { font-size: 15px; font-weight: 600; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.stack { display: grid; gap: 4px; justify-items: start; }
 .spaced { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; } .aside { margin-left: 10px; } /* space, not dots, between parts */
 .nowrap { white-space: nowrap; }
 .chip + .chip { margin-left: 4px; }
