@@ -264,7 +264,7 @@ threshold ${o[2]}`;if(n==="changeThreshold")return`threshold ${o[0]}`}catch{}ret
     </div>`}function cw(){return E`
     <textarea rows="3" spellcheck="false" aria-label="Transaction to copy" placeholder="Safe{Wallet} transaction link, or Transaction Builder JSON"
       .value=${St(m.d.source)} @input=${(e)=>{m.d.source=e.target.value,m.lines="",dt(),Bd()}}></textarea>
-    ${m.lines?E`<div class="small good">✓ ${m.sourceNote}</div>`:R}`}var uw=["Safe","Change","Review"];function fw(e){return E`<nav class="stages" aria-label="Steps">${uw.map((t,r)=>{let n=r+1;return E`${r?E`<span class=${`stage-line ${n<=e?"done":""}`}></span>`:R}
+    ${m.lines?E`<div class="small good">✓ ${m.sourceNote}</div>`:R}`}var uw=["Safe","Build Txn","Review"];function fw(e){return E`<nav class="stages" aria-label="Steps">${uw.map((t,r)=>{let n=r+1;return E`${r?E`<span class=${`stage-line ${n<=e?"done":""}`}></span>`:R}
       <button class=${`stage ${n===e?"on":n<e?"done":""}`} aria-current=${n===e?"step":R}
         ?disabled=${n>e&&!G5(n)} @click=${()=>n!==e&&hi(n)}><span class="stage-n">${n}</span>${t}</button>`})}</nav>`}var $d=(e,t)=>E`<div class="footer">${e?E`<button class="ghost" @click=${()=>hi(e)}>← Back</button>`:R}<span class="grow"></span>${t}</div>`,yx=()=>m.errors.length?E`<div class="errors">${m.errors.map((e)=>E`<div>${e}</div>`)}</div>`:R;function pw(){let e=Nn().length;return E`<section class="card">
     ${iw()}

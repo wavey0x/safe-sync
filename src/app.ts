@@ -36,7 +36,7 @@ type Draft = {
   source: string
 }
 type Pick = Found & { selected: boolean }
-type Stage = 1 | 2 | 3 // Safe, Change, Review
+type Stage = 1 | 2 | 3 // Safe, Build Txn, Review
 
 let storageOk = true
 const store = {
@@ -184,7 +184,7 @@ const validOwner = (s: string) => isAddress(s) || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.e
 
 // ---------------------------------------------------------------- compose: stages
 
-/** Change needs a selected Safe; Review also needs a complete change. */
+/** Build Txn needs a selected Safe; Review also needs a complete change. */
 const reachable = (n: Stage) => n === 1 || (selected().length > 0 && (n === 2 || !actionsFor().errors.length))
 
 /** Each move is a browser history entry, so the browser's Back and Forward step through the stages too. */
@@ -753,7 +753,7 @@ function replicateEditor() {
     ${S.lines ? html`<div class="small good">✓ ${S.sourceNote}</div>` : nothing}`
 }
 
-const STAGES = ['Safe', 'Change', 'Review']
+const STAGES = ['Safe', 'Build Txn', 'Review']
 function stageBar(stage: Stage) {
   return html`<nav class="stages" aria-label="Steps">${STAGES.map((label, i) => {
     const n = (i + 1) as Stage

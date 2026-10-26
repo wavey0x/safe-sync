@@ -16,7 +16,7 @@ browser's Back and Forward move between them, and a reload stays on the step you
 1. **Safe:** paste its address. It's looked up on every chain, and each chain it's on shows up as a
    chip; click a chip to leave that chain out. **+ Another address** adds a Safe that was deployed at a
    different address on some chains. **Continue** once at least one is selected.
-2. **Change**, one of two kinds:
+2. **Build Txn**, one of two kinds:
    - **Owners:** the owners of the Safe most chains share are copied in once ("Starting from …"),
      then you edit them: *Swap* or *Remove* any, *+ Add owner* (address or name.eth), and set
      the *Threshold*. That target is saved as it is and never recomputed from the chains, so Edit
@@ -34,7 +34,7 @@ browser's Back and Forward move between them, and a reload stays on the step you
    exact steps.
 4. **Copy signing link** creates the link and copies it ("Copied ✓"); *Sign now* opens it. Going back
    without changing anything keeps the results; any edit throws them away, so a link never carries
-   stale transactions. *Edit* on a signing link reopens its change at step 2.
+   stale transactions. *Edit* on a signing link reopens it at Build Txn.
 
 **Signers**: open the link, check the code next to the title with whoever sent it, connect, then click **Sign N**. The title says what the link does ("Swap 2 owners on 15 Safes").
 
