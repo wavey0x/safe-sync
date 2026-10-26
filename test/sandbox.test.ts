@@ -195,14 +195,44 @@ test.skipIf(!enabled)('anyone else proposes unsigned, naming an owner: untrusted
   const t = (await svc.getTx(252, hash))!
   expect([t.trusted, t.confirmations, t.proposedByDelegate]).toEqual([false, [], null])
   expect(JSON.parse((t as any).origin)).toEqual({ name: 'Safe Sync', note: `unsigned, sent by ${outsider}` })
-  // Out of the default (trusted) listing, which is what Safe{Wallet}'s queue shows; ours asks for untrusted too.
+  // Out of the trusted listings; the link page can still retrieve its own unsigned proposal by hash.
   expect(await svc.queued(252, sb.team, 1000)).toEqual([])
-  expect((await svc.atNonce(252, sb.team, 1000)).map(x => [x.safeTxHash, x.trusted])).toEqual([[hash, false]])
+  expect(await svc.atNonce(252, sb.team, 1000)).toEqual([])
   // The first owner's signature confirms it and makes it trusted.
   await svc.submit(tx, hash, OWNERS[5].address, await sign(tx, OWNERS[5]), true)
   const after = (await svc.getTx(252, hash))!
   expect([after.trusted, after.confirmations.map(c => c.owner)]).toEqual([true, [OWNERS[5].address]])
   expect((await svc.queued(252, sb.team, 1000)).map(x => x.safeTxHash)).toEqual([hash])
+}, 60_000)
+
+test.skipIf(!enabled)('unsigned proposals cannot hide a signed transaction at the same nonce', async () => {
+  const owner = OWNERS[5], chainId = 252, nonce = 2000
+  const tx: Tx = { chainId, safe: sb.team, nonce, to: sb.team, value: '0', operation: 0,
+    data: encodeFunctionData({ abi: parseAbi(['function changeThreshold(uint256)']), functionName: 'changeThreshold', args: [3n] }) }
+  const hash = safeTxHash(tx)
+  await svc.submit(tx, hash, owner.address, await sign(tx, owner), false)
+  let unsignedHash = hash
+  for (let n = 4; n < 24; n++) {
+    const noise = { ...tx, data: encodeFunctionData({ abi: parseAbi(['function changeThreshold(uint256)']), functionName: 'changeThreshold', args: [BigInt(n)] }) }
+    unsignedHash = safeTxHash(noise)
+    await svc.propose(noise, unsignedHash, ACCOUNTS[0].address, null, owner.address)
+  }
+  expect((await svc.atNonce(chainId, sb.team, nonce)).map(t => t.safeTxHash)).toEqual([hash])
+  expect((await svc.getTx(chainId, hash))!.confirmations.map(c => c.owner)).toEqual([owner.address])
+  expect((await svc.getTx(chainId, unsignedHash))!.trusted).toBe(false)
+}, 60_000)
+
+test.skipIf(!enabled)('the complete queue keeps an existing transaction nonce beyond the first page', async () => {
+  const owner = OWNERS[5], chainId = 8453, nonce = 5000
+  const data = (n: bigint) => encodeFunctionData({ abi: parseAbi(['function changeThreshold(uint256)']), functionName: 'changeThreshold', args: [n] })
+  const tx: Tx = { chainId, safe: sb.team, nonce, to: sb.team, value: '0', operation: 0, data: data(3n) }
+  for (let i = 0; i <= 50; i++) {
+    const next = { ...tx, nonce: nonce + i, data: i ? data(4n) : tx.data }
+    await svc.submit(next, safeTxHash(next), owner.address, await sign(next, owner), false)
+  }
+  const queue = await svc.queued(chainId, sb.team, nonce)
+  expect(queue).toHaveLength(51)
+  expect(pickNonce(tx, queue, 'after')).toEqual({ nonce, same: true })
 }, 60_000)
 
 test.skipIf(!enabled)('simple mode: the two well-known test wallets run a 2-of-2 Safe on three local chains', async () => {

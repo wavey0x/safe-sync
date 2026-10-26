@@ -392,11 +392,11 @@ async function loadRow(r: Row) {
   findDelegations()
 }
 
-/** One request: this transaction's confirmations and execution, plus anything else at the same nonce. */
+/** Read trusted transactions at this nonce, with a hash lookup if ours is absent or still unsigned. */
 async function readService(r: Row) {
   try {
     const all = await svc.atNonce(r.tx.chainId, r.tx.safe, r.tx.nonce)
-    const t = all.find(x => x.safeTxHash.toLowerCase() === r.hash.toLowerCase())
+    const t = all.find(x => x.safeTxHash.toLowerCase() === r.hash.toLowerCase()) ?? await svc.getTx(r.tx.chainId, r.hash)
     // Anyone can post an unsigned proposal, so only a trusted (or executed) competitor counts.
     r.others = all.filter(x => x !== t && (x.trusted || x.isExecuted)).map(x => ({ safeTxHash: x.safeTxHash, isExecuted: x.isExecuted }))
     r.proposed = !!t; r.trusted = t?.trusted; r.svcExecuted = t?.isExecuted; r.readAt = Date.now(); r.svc = 'ok'

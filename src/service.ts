@@ -50,6 +50,20 @@ async function fail(res: Response): Promise<never> {
   throw new Error(`Safe service ${res.status}: ${t.slice(0, 300)}`)
 }
 
+/** Read every page without trusting a service-supplied URL as a new request destination. */
+async function list<T>(chainId: number, path: string): Promise<T[]> {
+  const results: T[] = []
+  for (let offset = 0; ; ) {
+    const res = await api(chainId, `${path}&offset=${offset}`)
+    if (!res.ok) await fail(res)
+    const page: { results: T[]; next: string | null } = await res.json()
+    results.push(...page.results)
+    if (!page.next) return results
+    if (!page.results.length) throw new Error('Safe service returned an empty page with more results')
+    offset += page.results.length
+  }
+}
+
 export type ServiceTx = { safe: Address; to: Address; value: string; data: Hex | null; operation: number; nonce: string; safeTxHash: Hex; isExecuted: boolean; trusted: boolean; proposedByDelegate: Address | null; confirmations: { owner: Address; signature: Hex }[] }
 
 export async function getTx(chainId: number, hash: Hex): Promise<ServiceTx | null> {
@@ -59,15 +73,9 @@ export async function getTx(chainId: number, hash: Hex): Promise<ServiceTx | nul
   return res.json()
 }
 
-/**
- * Every transaction at one nonce of a Safe, executed or not: ours (with its confirmations) and any competitor, in one
- * request. Untrusted (unsigned) proposals are included, since ours may be one; anyone can post those, so a caller
- * counts an untrusted competitor as noise.
- */
+/** Trusted transactions at one nonce. Look up our own unsigned proposal by hash, keeping unsigned spam out. */
 export async function atNonce(chainId: number, safe: Address, nonce: number): Promise<ServiceTx[]> {
-  const res = await api(chainId, `/v2/safes/${safe}/multisig-transactions/?nonce=${nonce}&trusted=false&limit=20`)
-  if (!res.ok) await fail(res)
-  return (await res.json()).results
+  return list<ServiceTx>(chainId, `/v2/safes/${safe}/multisig-transactions/?nonce=${nonce}&limit=20`)
 }
 
 /**
@@ -75,9 +83,8 @@ export async function atNonce(chainId: number, safe: Address, nonce: number): Pr
  * can post an unsigned proposal. They decide the nonce of a new transaction (pickNonce).
  */
 export async function queued(chainId: number, safe: Address, nonce: number): Promise<{ nonce: number; safeTxHash: Hex }[]> {
-  const res = await api(chainId, `/v2/safes/${safe}/multisig-transactions/?executed=false&nonce__gte=${nonce}&limit=50`)
-  if (!res.ok) await fail(res)
-  return (await res.json()).results.map((t: any) => ({ nonce: Number(t.nonce), safeTxHash: t.safeTxHash }))
+  return (await list<ServiceTx>(chainId, `/v2/safes/${safe}/multisig-transactions/?executed=false&nonce__gte=${nonce}&limit=50`))
+    .map(t => ({ nonce: Number(t.nonce), safeTxHash: t.safeTxHash }))
 }
 
 const proposal = (tx: Tx, hash: Hex, sender: Address, signature: Hex | null, origin: Record<string, string> = {}) => api(tx.chainId, `/v2/safes/${tx.safe}/multisig-transactions/`, {
@@ -112,7 +119,5 @@ export type Delegation = { safe: Address | null; delegate: Address; delegator: A
 
 /** Every delegation naming `delegate` on this chain, expired ones included (the service lists those too). */
 export async function delegations(chainId: number, delegate: Address): Promise<Delegation[]> {
-  const res = await api(chainId, `/v2/delegates/?delegate=${delegate}&limit=100`)
-  if (!res.ok) await fail(res)
-  return (await res.json()).results
+  return list<Delegation>(chainId, `/v2/delegates/?delegate=${delegate}&limit=100`)
 }
