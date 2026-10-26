@@ -42,7 +42,7 @@ type Draft = {
 }
 type Pick = Found & { selected: boolean }
 type Endpoint = 'rpc' | 'service'
-type Edit = { text: string; state: 'checking' | 'saved' | 'bad'; note?: string } // a Settings field being saved
+type Edit = { text: string; state: 'typing' | 'checking' | 'saved' | 'bad'; note?: string } // a Settings field being saved
 // queue: other transactions queued at or after the on-chain nonce. same: this very transaction is one of them.
 type Prep = Prepared & { queue?: Queued[]; same?: boolean; checking?: boolean }
 type Stage = 1 | 2 | 3 // Safe, Build Txn, Review
@@ -740,7 +740,7 @@ function steps(list: Step[], labels: Record<string, string>) {
 /** What one Safe's transaction does, as exact steps: the detail behind each row. */
 const actionsView = (tx: Tx, labels: Record<string, string>) => html`<div class="actions-detail">
   ${steps(describe(tx), labels)}
-  ${tx.operation === 1 ? html`<div class="muted small">Sent through MultiSendCallOnly ${short(tx.to)} (delegatecall), so the inner calls run as the Safe.</div>` : nothing}
+  ${tx.operation === 1 ? html`<div class="muted small">Sent as delegatecall via <span data-tip=${tx.to}>MultiSend</span></div>` : nothing}
 </div>`
 
 const OWNER_FNS = ['swapOwner', 'addOwnerWithThreshold', 'removeOwner', 'changeThreshold']
@@ -1177,10 +1177,22 @@ const checkService = (url: string) => tryUrl(`${url}/api/v1/about/`, {}, j => (j
 const checking = new Set<Promise<unknown>>()
 /** The endpoint a chain uses unless overridden: its first public RPC, or its Safe service. */
 const defaultEndpoint = (kind: Endpoint, id: number) => { const c = CHAINS.find(c => c.id === id); return kind === 'rpc' ? c?.rpcs[0] : c?.service?.url }
+// Settings save themselves: a field that holds a whole URL saves when you pause typing, and leaving it (or Enter, or
+// closing Settings) saves whatever it holds, an empty field included.
+const pauses: Record<string, ReturnType<typeof setTimeout>> = {}
+function typed(kind: Endpoint, id: number, text: string) {
+  const key = `${kind}:${id}`
+  S.edits[key] = { text, state: 'typing' }
+  clearTimeout(pauses[key])
+  if (/^https?:\/\/[^\s/]+\.[^\s/]{2,}/.test(text.trim())) pauses[key] = setTimeout(() => saveEndpoint(kind, id, text), 700)
+}
 /** Saves an override once it works from here; an empty field, or the default typed back in, goes back to the default. */
 async function saveEndpoint(kind: Endpoint, id: number, text: string) {
   const key = `${kind}:${id}`, url = kind === 'service' ? text.trim().replace(/\/+$/, '').replace(/\/api$/, '') : text.trim()
   const done = (edit?: Edit) => { if (edit) S.edits[key] = edit; else delete S.edits[key]; update() }
+  clearTimeout(pauses[key])
+  const now = S.edits[key]
+  if (now && now.text === text && now.state !== 'typing') return // already being checked, saved or refused as it stands
   if (!url || url === defaultEndpoint(kind, id)) {
     if (S.settings[kind][id] !== undefined) { delete S.settings[kind][id]; applySettings(); S.settingsChanged = true }
     return done()
@@ -1208,14 +1220,19 @@ function openSettings() {
   history.pushState({ ...history.state, settings: true }, '', location.href)
   S.settingsOpen = true; S.settingsChanged = false; update(); scrollTo(0, 0)
 }
-/** Done right after typing a URL waits for its check: it closes once saved, or stays open to say what's wrong. */
+/** Closing saves what's still being typed and waits for its check: it closes once saved, or stays open to say what's wrong. */
 async function closeSettings() {
+  for (const [key, e] of Object.entries(S.edits)) if (e.state === 'typing') saveEndpoint(key.split(':')[0] as Endpoint, Number(key.split(':')[1]), e.text)
   if (checking.size) {
     S.closing = true; update(); await Promise.all(checking); S.closing = false
     if (Object.values(S.edits).some(e => e.state === 'bad')) return update()
   }
   if (history.state?.settings) history.back(); else settingsClosed()
 }
+// Escape closes Settings, except while it's clearing the chain search.
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && S.settingsOpen && !(e.target instanceof HTMLInputElement && e.target.type === 'search' && e.target.value)) closeSettings()
+})
 function settingsClosed() {
   S.settingsOpen = false; S.edits = {}; S.openChain = S.addingChain = null
   if (S.settingsChanged && S.mode === 'batch') refresh() // read every Safe again through the new endpoints
@@ -1228,7 +1245,7 @@ function endpointField(kind: Endpoint, id: number) {
   return html`<label class="endpoint">
     <span class="small muted">${kind === 'rpc' ? 'RPC' : 'Safe Transaction Service'}</span>
     <input class="mono small" spellcheck="false" autocomplete="off" placeholder=${kind === 'rpc' ? 'https://…' : 'None'}
-      .value=${live(e?.text ?? value)} @change=${(ev: any) => saveEndpoint(kind, id, ev.target.value)}>
+      .value=${live(e?.text ?? value)} @input=${(ev: any) => typed(kind, id, ev.target.value)} @change=${(ev: any) => saveEndpoint(kind, id, ev.target.value)}>
     ${e?.state === 'checking' ? html`<span class="small muted">Checking…</span>`
     : e?.state === 'bad' ? html`<span class="small bad">${e.note}</span>`
     : e?.state === 'saved' ? html`<span class="small good">Saved</span>` : nothing}
@@ -1259,11 +1276,15 @@ function settingsView() {
     </td></tr>` : nothing}`
   }
   return html`<section class="card">
-    <div class="row"><h2 class="grow">Settings</h2><button class="primary" ?disabled=${S.closing} @click=${closeSettings}>${S.closing ? 'Checking…' : 'Done'}</button></div>
+    <div class="row"><h2 class="grow">Settings</h2>
+      <button class="ghost close" aria-label="Close settings" data-tip=${S.closing ? 'Checking your last change…' : 'Close'} ?disabled=${S.closing} @click=${closeSettings}>
+        ${S.closing ? html`<i class="spin"></i>` : html`<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>`}
+      </button>
+    </div>
     <label class="endpoint">
       <span class="small muted">Safe API key</span>
       <input class="mono small" spellcheck="false" autocomplete="off" placeholder="Optional: raises Safe's rate limits" .value=${live(S.settings.apiKey)}
-        @change=${(e: any) => { S.settings.apiKey = e.target.value.trim(); applySettings(); S.settingsChanged = true; update() }}>
+        @input=${(e: any) => { S.settings.apiKey = e.target.value; applySettings(); S.settingsChanged = true }}>
     </label>
     <div class="row">
       <input class="grow" type="search" placeholder="Search chains" aria-label="Search chains" .value=${live(S.chainQuery)} @input=${(e: any) => { S.chainQuery = e.target.value; update() }}>
