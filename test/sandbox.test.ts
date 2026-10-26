@@ -138,15 +138,16 @@ test.skipIf(!enabled)('Safe service rules the client depends on', async () => {
   const got = (await svc.getTx(8453, safeTxHash(tx)))!
   expect([typeof got.nonce, typeof got.value]).toEqual(['string', 'string'])
 
-  // Throttling, on a mock with the public API's 2 req/s: bursts get 429 with Retry-After,
-  // and the client (even unpaced) retries through them.
-  const slow = startMockService({ rps: 2, rpc: sb.rpc })
+  // Throttling: past the limit the service answers 429 with Retry-After, and the client (even unpaced) waits and
+  // retries. A 1 req/s mock shows both with one wait: the burst uses the second up, so the client's call is refused once.
+  const slow = startMockService({ rps: 1, rpc: sb.rpc })
   try {
     const url = `${slow.url(8453)}/api/v2/multisig-transactions/${safeTxHash(tx)}/`
-    const burst = await Promise.all(Array.from({ length: 6 }, () => fetch(url)))
+    const burst = await Promise.all(Array.from({ length: 2 }, () => fetch(url)))
+    expect(burst.map(r => r.status).sort()).toEqual([404, 429])
     expect(burst.find(r => r.status === 429)?.headers.get('retry-after')).toBe('1')
     svc.config.service[8453] = slow.url(8453)
-    expect(await Promise.all(Array.from({ length: 6 }, () => svc.getTx(8453, safeTxHash(tx))))).toEqual(Array(6).fill(null))
+    expect(await svc.getTx(8453, safeTxHash(tx))).toBeNull()
   } finally { svc.config.service[8453] = sb.service.url(8453); slow.stop() }
 }, 60_000)
 
@@ -187,41 +188,25 @@ test.skipIf(!enabled)('a proposer (delegate) proposes in its delegator\'s name, 
 }, 60_000)
 
 // The app no longer proposes unsigned, but anyone can: the service keeps such proposals untrusted, and so must we.
-test.skipIf(!enabled)('an unsigned proposal naming an owner stays untrusted until an owner confirms', async () => {
-  const tx: Tx = { chainId: 252, safe: sb.team, nonce: 1000, to: sb.team, value: '0', data: encodeFunctionData({ abi: parseAbi(['function changeThreshold(uint256)']), functionName: 'changeThreshold', args: [3n] }), operation: 0 }
-  const hash = safeTxHash(tx), outsider = ACCOUNTS[0].address
-  // The service still takes a proposal without a signature, but only from an owner (or delegate) as sender.
-  const res = await post(252, `/v2/safes/${tx.safe}/multisig-transactions/`, await proposal(tx, outsider, null))
-  expect([res.status, await res.text()]).toEqual([422, expect.stringContaining(`Sender=${outsider} is not an owner or delegate`)])
-
-  expect((await post(252, `/v2/safes/${tx.safe}/multisig-transactions/`, await proposal(tx, OWNERS[1].address, null))).status).toBe(201)
-  const t = (await svc.getTx(252, hash))!
-  expect([t.trusted, t.confirmations, t.proposedByDelegate]).toEqual([false, [], null])
-  // Out of the trusted listings; the link page can still retrieve it by hash.
-  expect(await svc.queued(252, sb.team, 1000)).toEqual([])
-  expect(await svc.atNonce(252, sb.team, 1000)).toEqual([])
-  // The first owner's signature confirms it and makes it trusted.
-  await svc.submit(tx, hash, OWNERS[5].address, await sign(tx, OWNERS[5]), true)
-  const after = (await svc.getTx(252, hash))!
-  expect([after.trusted, after.confirmations.map(c => c.owner)]).toEqual([true, [OWNERS[5].address]])
-  expect((await svc.queued(252, sb.team, 1000)).map(x => x.safeTxHash)).toEqual([hash])
-}, 60_000)
-
-test.skipIf(!enabled)('unsigned proposals cannot hide a signed transaction at the same nonce', async () => {
-  const owner = OWNERS[5], chainId = 252, nonce = 2000
-  const tx: Tx = { chainId, safe: sb.team, nonce, to: sb.team, value: '0', operation: 0,
-    data: encodeFunctionData({ abi: parseAbi(['function changeThreshold(uint256)']), functionName: 'changeThreshold', args: [3n] }) }
-  const hash = safeTxHash(tx)
-  await svc.submit(tx, hash, owner.address, await sign(tx, owner), false)
-  let unsignedHash = hash
-  for (let n = 4; n < 24; n++) {
-    const noise = { ...tx, data: encodeFunctionData({ abi: parseAbi(['function changeThreshold(uint256)']), functionName: 'changeThreshold', args: [BigInt(n)] }) }
-    unsignedHash = safeTxHash(noise)
-    expect((await post(chainId, `/v2/safes/${noise.safe}/multisig-transactions/`, await proposal(noise, owner.address, null))).status).toBe(201)
-  }
+test.skipIf(!enabled)('unsigned proposals stay untrusted until an owner confirms, and cannot hide a signed transaction', async () => {
+  const owner = OWNERS[5], chainId = 252, nonce = 2000, path = `/v2/safes/${sb.team}/multisig-transactions/`
+  const threshold = (n: bigint): Tx => ({ chainId, safe: sb.team, nonce, to: sb.team, value: '0', operation: 0,
+    data: encodeFunctionData({ abi: parseAbi(['function changeThreshold(uint256)']), functionName: 'changeThreshold', args: [n] }) })
+  // The service takes a proposal without a signature, but only with an owner (or delegate) as sender.
+  const res = await post(chainId, path, await proposal(threshold(3n), ACCOUNTS[0].address, null))
+  expect([res.status, await res.text()]).toEqual([422, expect.stringContaining(`Sender=${ACCOUNTS[0].address} is not an owner or delegate`)])
+  // Unsigned noise at the nonce of a signed transaction: untrusted, and out of the listings, so it can't crowd it out.
+  const signed = threshold(3n), hash = safeTxHash(signed)
+  await svc.submit(signed, hash, owner.address, await sign(signed, owner), false)
+  for (let n = 4n; n < 24n; n++) expect((await post(chainId, path, await proposal(threshold(n), OWNERS[1].address, null))).status).toBe(201)
+  const unsigned = threshold(23n), unsignedHash = safeTxHash(unsigned)
+  expect([(await svc.getTx(chainId, unsignedHash))!.trusted, (await svc.getTx(chainId, unsignedHash))!.confirmations]).toEqual([false, []])
   expect((await svc.atNonce(chainId, sb.team, nonce)).map(t => t.safeTxHash)).toEqual([hash])
-  expect((await svc.getTx(chainId, hash))!.confirmations.map(c => c.owner)).toEqual([owner.address])
-  expect((await svc.getTx(chainId, unsignedHash))!.trusted).toBe(false)
+  expect((await svc.queued(chainId, sb.team, nonce)).map(t => t.safeTxHash)).toEqual([hash])
+  // An owner's signature confirms an unsigned proposal and makes it trusted, so it shows from then on.
+  await svc.submit(unsigned, unsignedHash, owner.address, await sign(unsigned, owner), true)
+  expect((await svc.getTx(chainId, unsignedHash))!.trusted).toBe(true)
+  expect((await svc.atNonce(chainId, sb.team, nonce)).map(t => t.safeTxHash).sort()).toEqual([hash, unsignedHash].sort())
 }, 60_000)
 
 test.skipIf(!enabled)('the complete queue keeps an existing transaction nonce beyond the first page', async () => {

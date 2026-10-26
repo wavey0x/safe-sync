@@ -18,6 +18,15 @@
         "sandbox"
       ],
       "port": 8600
+    },
+    {
+      "name": "sandbox-fast",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": [
+        "run",
+        "sandbox:fast"
+      ],
+      "port": 8600
     }
   ]
 }

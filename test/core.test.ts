@@ -13,14 +13,19 @@ const DATA = '0x8d80ff0a00000000000000000000000000000000000000000000000000000000
 const EXAMPLE: Tx = { chainId: 1, safe: ORIGINAL, nonce: 13, to: '0x40A2aCCbd92BCA938b02010E17A5b8929b49130D', value: '0', data: DATA, operation: 1 }
 const NAMES = { 'winthorpe.eth': '0xBd0a74e51729a4D0B92742e67183C4cBc97bCA92' as Address }
 
-test('reproduces the Safe{Wallet} proposal for the rotation example byte for byte', () => {
+test('reproduces the Safe{Wallet} proposal for the rotation example byte for byte, from swap lines and from the owners editor', () => {
+  const state = { version: '1.3.0', owners: OWNERS, threshold: 5, nonce: 13 }
   const { actions } = parseActions('swap 0x99BC02c239025E431D5741cC1DbA8CE77fc51CE3 winthorpe.eth\n0xe9A65fe8190fA5A4b5E277b84f0aAce686FDc174 -> 0x4046B37Ffc36B0C723d7Fc64e0C763B698D81934')
-  const b = buildCalls(actions, ORIGINAL, { version: '1.3.0', owners: OWNERS, threshold: 5, nonce: 13 }, NAMES)
+  const b = buildCalls(actions, ORIGINAL, state, NAMES)
   expect(packMultiSend(b.calls)).toBe(DATA)
   expect(safeTxHash(EXAMPLE)).toBe('0x50e58d6df4e9e82b1d7adfdaed834632841a4bab3ed6a44dd8b8e7089c01029d')
   expect(b.owners[4]).toBe(NAMES['winthorpe.eth'])
   expect(b.owners[0]).toBe(getAddress('0x4046B37Ffc36B0C723d7Fc64e0C763B698D81934'))
   expect(b.threshold).toBe(5)
+  // The owners editor stores a target list with its replacements instead; it must build the same calls.
+  const target = OWNERS.map(o => (o === OWNERS[4] ? 'winthorpe.eth' : o === OWNERS[0] ? '0x4046B37Ffc36B0C723d7Fc64e0C763B698D81934' : o))
+  const sync = { kind: 'sync' as const, owners: target, threshold: 5, replace: [[OWNERS[4], 'winthorpe.eth'], [OWNERS[0], '0x4046B37Ffc36B0C723d7Fc64e0C763B698D81934']] as [string, string][] }
+  expect(packMultiSend(buildCalls([sync], ORIGINAL, state, NAMES).calls)).toBe(DATA)
 })
 
 test('wallet typed-data payload hashes to the same safeTxHash and recovers the signer', async () => {
@@ -121,13 +126,6 @@ test('batch link round-trips and stores identical payloads once', async () => {
 test('signatures are packed in ascending owner order, threshold only', () => {
   const sigs = ['0x3', '0x1', '0x2'].map(o => ({ owner: getAddress(o.padEnd(42, '0')), sig: `0x${o.slice(2).repeat(130)}` as Hex }))
   expect(packSigs(sigs, 2)).toBe(`0x${'1'.repeat(130)}${'2'.repeat(130)}`)
-})
-
-test('sync to a target owner list: the edited rotation reproduces the Safe{Wallet} proposal exactly', () => {
-  const target = OWNERS.map(o => (o === OWNERS[4] ? 'winthorpe.eth' : o === OWNERS[0] ? '0x4046B37Ffc36B0C723d7Fc64e0C763B698D81934' : o))
-  const sync = { kind: 'sync' as const, owners: target, threshold: 5, replace: [[OWNERS[4], 'winthorpe.eth'], [OWNERS[0], '0x4046B37Ffc36B0C723d7Fc64e0C763B698D81934']] as [string, string][] }
-  const b = buildCalls([sync], ORIGINAL, { version: '1.3.0', owners: OWNERS, threshold: 5, nonce: 13 }, NAMES)
-  expect(packMultiSend(b.calls)).toBe(DATA)
 })
 
 test('sync fixes drift per Safe and leaves Safes already in sync alone', () => {

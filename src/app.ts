@@ -123,6 +123,8 @@ function applySettings() {
   store.set('safesync:settings', S.settings)
 }
 applySettings()
+// `bun run sandbox:fast` (test/sandbox.ts) drops the 1 req/s pacing, which only matters against the real service.
+if ((window as any).__SANDBOX__?.fast) svc.config.gapMs = 0
 
 // ---------------------------------------------------------------- compose: which Safes
 

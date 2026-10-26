@@ -112,6 +112,7 @@ executor pays gas.
 bun run sandbox                                  # 14 local chains with real chain ids; sandbox wallet only
 bun run sandbox -- --signer 0xA,0xB --port 8700  # also make your addresses owners, on other ports
 bun run sandbox:simple                           # a 2-of-2 Safe on 3 local-only chains, for your own wallet
+bun run sandbox:fast                             # no Safe service pacing and an instant wallet, for quick checks
 ```
 
 - **Full sandbox:**
@@ -127,7 +128,7 @@ bun run sandbox:simple                           # a 2-of-2 Safe on 3 local-only
 - **Simple sandbox:** chain ids 31338 to 31340 belong to no real network, so your wallet adds them as
   local networks and can sign and execute safely. It defaults to the first two test accounts as
   owners. Remove those networks from your wallet afterwards.
-- **Both:** a mock Safe Transaction Service (`test/mock-service.ts`) that follows the real service's
+- **Both:** `/link` opens a ready signing link for the sandbox's own batch. There's a mock Safe Transaction Service (`test/mock-service.ts`) that follows the real service's
   source (v6.13.0 at `83316729`, safe-eth-py 7.27.0): checksummed addresses, hash check, the sender must
   be one of the signers, get-or-create proposals, delegates (proposers) and unsigned, untrusted
   proposals, DELEGATECALL only to MultiSend, 422/400/404 bodies, executions indexed from the chain, and

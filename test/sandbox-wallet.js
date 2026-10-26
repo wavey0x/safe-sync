@@ -19,7 +19,7 @@
   const fail = (message, code) => Object.assign(new Error(message), { code })
   const confirm = () => new Promise((resolve, reject) => setTimeout(() => {
     if (rejectNext) { rejectNext = false; box.querySelector('input').checked = false; reject(fail('User rejected the request.', 4001)) } else resolve()
-  }, 700))
+  }, cfg.fast ? 0 : 700))
   const rpc = async (method, params) => {
     const res = await fetch(cfg.rpcs[chain], { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })
     const j = await res.json()

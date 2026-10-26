@@ -9,11 +9,14 @@
 //   bun run sandbox -- --simple          instead: one 2-of-2 Safe owned by the first two test accounts (or your
 //                                        --signer addresses) on 3 local-only chain ids, so a browser wallet can
 //                                        add them as networks and sign and execute against the local chains
+//   bun run sandbox:fast                 (or -- --fast) no Safe service pacing or throttling, and the sandbox
+//                                        wallet answers at once: for quick checks, not for seeing slow loading
+//   /link                                opens a ready signing link for the sandbox's own batch
 //   startSandbox()                      used by test/sandbox.test.ts
 import { createWalletClient, encodeFunctionData, getAddress, http, parseAbi, publicActions, type Address, type Hex } from 'viem'
 import { mnemonicToAccount } from 'viem/accounts'
 import { CHAINS } from '../src/chains'
-import { execData, normalizeSig, parseActions, prepareTarget, readSafe, safeTxHash, walletTypedData, config, type Tx } from '../src/safe'
+import { encodeBatch, execData, normalizeSig, parseActions, parseTargets, prepareTarget, readSafe, safeTxHash, walletTypedData, config, type Tx } from '../src/safe'
 import { startMockService } from './mock-service'
 
 const root = decodeURIComponent(new URL('..', import.meta.url).pathname)
@@ -207,8 +210,8 @@ export async function startSandbox({ basePort = 0, servicePort = 0, rps = 2, log
 if (import.meta.main) {
   const signers = process.argv.flatMap((a, i) => (process.argv[i - 1] === '--signer' ? a.split(',') : [])).map(a => getAddress(a.trim()))
   const port = Number(process.argv[process.argv.indexOf('--port') + 1]) || 8600
-  const simple = process.argv.includes('--simple')
-  const sb = await startSandbox({ basePort: port + 1, servicePort: port + 55, log: process.argv.includes('--log'), signers, simple })
+  const simple = process.argv.includes('--simple'), fast = process.argv.includes('--fast')
+  const sb = await startSandbox({ basePort: port + 1, servicePort: port + 55, log: process.argv.includes('--log'), signers, simple, rps: fast ? 1000 : 2 })
   const runId = String(Date.now())
   const labels = ACCOUNTS.map(a => {
     const owner = sb.owners.indexOf(a.address), incoming = INCOMING.findIndex(i => i.address === a.address)
@@ -216,10 +219,16 @@ if (import.meta.main) {
     return { address: a.address, label: owner >= 0 ? `Owner ${owner + 1}${signers.includes(a.address) ? ' (yours)' : ''}` : incoming >= 0 ? `Incoming owner ${incoming + 1}` : proposer ? 'Proposer (not an owner)' : 'Not an owner' }
   })
   const draft = { mode: 'owners', source: '', excluded: [], ...sb.draft }
-  const cfg = `window.__SANDBOX__=${JSON.stringify({ runId, rpcs: sb.rpc, accounts: labels, settings: sb.settings, draft, walletOnly: !simple })};`
+  // The sandbox's own batch as a signing link, so a check can open the link page without clicking through.
+  const t = parseTargets(sb.targets), a = parseActions(sb.actions)
+  const txs = (await Promise.all(t.targets.map(x => prepareTarget(x, a.actions, {})))).flatMap(p => (p.tx && !p.error && !p.skip ? [p.tx] : []))
+  const link = `/#${await encodeBatch({ title: `Sandbox batch on ${txs.length} Safes`, created: Date.now(), txs, labels: {}, src: draft })}`
+  // fast: the app drops its Safe service pacing (src/app.ts) and the sandbox wallet stops waiting before it answers.
+  const cfg = `window.__SANDBOX__=${JSON.stringify({ runId, rpcs: sb.rpc, accounts: labels, settings: sb.settings, draft, walletOnly: !simple, fast, link })};`
   const server = Bun.serve({
     port,
-    async fetch() {
+    async fetch(req) {
+      if (new URL(req.url).pathname === '/link') return Response.redirect(link, 302)
       // Read on every request, so a rebuild (or a wallet edit) shows on reload.
       const boot = `${cfg}\n${await Bun.file(`${root}test/sandbox-wallet.js`).text()}`
       const html = (await Bun.file(`${root}dist/safe-sync.html`).text()).replace('<head>', () => `<head><script>${boot}</script>`)
@@ -231,7 +240,7 @@ Safe Sync simple sandbox: http://localhost:${server.port}
 
   Safe ${sb.team}, ${sb.owners.length}-of-${sb.owners.length}, owners ${sb.owners.join(', ')}
   on local chains ${SIMPLE_CHAIN_IDS.join(', ')} (RPC ${sb.chains[0].rpc} and up), mock Safe service on :${sb.service.port}
-  The draft adds two owners. Sign once with each owner, then execute.
+  The draft adds two owners. Sign once with each owner, then execute. Signing link: http://localhost:${server.port}/link
 
   Your browser wallet adds each local chain the first time (one approval per chain), so signing and
   executing both go to these local chains. Remove those networks from the wallet afterwards.
@@ -245,10 +254,11 @@ Safe Sync sandbox: http://localhost:${server.port}
   the same rotation already queued on the original Safe with one signature, and a proposer (Safe{Wallet}
   delegate of owner 2) that proposes signed but never confirms. "Not an owner" only views the link.
 
-  The draft is filled in: Review → Copy signing link → Propose now.
+  The draft is filled in: Review → Copy signing link → Propose now. Or open a ready link: http://localhost:${server.port}/link
   Choose who signs in the "Sandbox wallet" box at the bottom left. Other wallets are hidden here: these chains
   use real chain ids, so a real wallet would send executions to the real networks (use --simple for that).
   Ctrl-C to stop.
 `)
+  if (fast) console.log('  Fast: no Safe service pacing or throttling, and the wallet answers at once.\n')
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { sb.stop(); process.exit(0) })
 }
