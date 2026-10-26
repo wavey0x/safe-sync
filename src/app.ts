@@ -1073,10 +1073,19 @@ function icon(r: Row, st: ReturnType<typeof status>) {
   return mark('idle', 'Nothing for you to do', '–')
 }
 const KIND_CLASS: Record<Kind, string> = { loading: 'muted', collecting: '', ready: 'good', waiting: 'muted', executed: 'good', blocked: 'bad', unknown: 'warn' }
-/** "2/5" over one dash per signature the threshold needs, filled as they come in; outlined once proposed, before anyone signs. */
+/** A Safe's transaction queue in its wallet app, on chains with a Safe service. */
+const queueLink = (tx: { chainId: number; safe: string }) => { const s = chainOf(tx.chainId)?.service; return s && `${s.app}/transactions/queue?safe=${s.prefix}:${tx.safe}` }
+/**
+ * "2/5" over one dash per signature the threshold needs, filled as they come in; outlined once proposed, before anyone signs.
+ * Opens the Safe's queue, where there is one.
+ */
 function sigCount(r: Row, st: ReturnType<typeof status>) {
-  const n = validSigs(r).length, t = r.threshold!
-  return html`<span class=${n === 0 && r.proposed ? 'count proposed' : 'count'} style=${`--t: ${t}`} data-tip=${st.detail ?? nothing}>${st.text}<span class="dashes" aria-hidden="true">${Array.from({ length: t }, (_, i) => html`<i class=${i < n ? 'on' : ''}></i>`)}</span></span>`
+  const n = validSigs(r).length, t = r.threshold!, queue = queueLink(r.tx)
+  const cls = n === 0 && r.proposed ? 'count proposed' : 'count', style = `--t: ${t}`
+  const body = html`${st.text}<span class="dashes" aria-hidden="true">${Array.from({ length: t }, (_, i) => html`<i class=${i < n ? 'on' : ''}></i>`)}</span>`
+  return queue
+    ? html`<a class=${cls} style=${style} href=${queue} target="_blank" rel="noopener" data-tip=${`${st.detail}. Opens the queue.`} @click=${(e: Event) => e.stopPropagation()}>${body}</a>`
+    : html`<span class=${cls} style=${style} data-tip=${st.detail ?? nothing}>${body}</span>`
 }
 
 

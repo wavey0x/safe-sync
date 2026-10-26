@@ -70,8 +70,8 @@ accepted.
 - Every Safe is listed with a mark: ✓ you signed (or proposed) it, ○ it needs you, – nothing for you
   to do, ! a problem, a dashed ring for yours that isn't in the Safe service yet (yellow when the
   upload failed), and a thin spinner while it's still being read. Hover or focus a mark for the
-  details. Next to it, the signature count (2/5) fills one dash per signature the threshold needs, and
-  is outlined green once proposed, before anyone signs. The one being signed is highlighted, with its
+  details. Next to it, the signature count (2/5) fills one dash per signature the threshold needs, is
+  outlined green once proposed, before anyone signs, and opens the Safe's queue in its wallet app. The one being signed is highlighted, with its
   safeTxHash, domain hash and message hash to compare against the device.
 - Reading the Safe service is slow (see below), so the page fills in Safe by Safe. Waiting that holds
   you up shows as a spinner on the button it blocks, saying what it's waiting for. Background reading
