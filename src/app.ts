@@ -70,7 +70,7 @@ const S = {
   found: [] as Pick[], looking: new Set<string>(), lines: '', sourceNote: '', loadingSource: false,
   preparing: false, prepared: [] as Prep[], errors: [] as string[], names: {} as Record<string, Address>, link: '',
   batch: null as Batch | null, id: '', rows: [] as Row[], loadError: '', pasted: '',
-  wallets: [] as Wallet[], provider: null as any, account: null as Address | null, walletMenu: '' as '' | 'header' | 'card', // walletMenu: which Connect opened it
+  wallets: [] as Wallet[], provider: null as any, account: null as Address | null, walletMenu: false,
   delegations: {} as Record<string, DelegationLookup>, // keyed "account:chainId"
   signing: false, executing: false, waiting: false, current: null as Row | null, open: new Set<string>(), notice: '', copied: '' as '' | 'yes' | 'failed',
   settings: settingsFrom(store.get('safesync:settings', {})), settingsOpen: !!history.state?.settings, settingsChanged: false, closing: false,
@@ -522,12 +522,12 @@ function use(provider: any, account: string) {
   findDelegations(); update()
 }
 
-/** Connects the only wallet there is; with several (or none), opens the menu under the button that asked. */
-async function connect(from: 'header' | 'card', w?: Wallet) {
+/** Connects the only wallet there is; with several (or none), opens the menu to pick from. */
+async function connect(w?: Wallet) {
   const wallet = w ?? (S.wallets.length === 1 ? S.wallets[0] : undefined)
   const provider = wallet?.provider ?? (S.wallets.length ? undefined : (window as any).ethereum)
-  if (!provider) return void ((S.walletMenu = S.walletMenu === from ? '' : from), update())
-  S.walletMenu = ''
+  if (!provider) return void ((S.walletMenu = !S.walletMenu), update())
+  S.walletMenu = false
   try {
     const [account] = await provider.request({ method: 'eth_requestAccounts' })
     use(provider, account)
@@ -538,7 +538,7 @@ async function connect(from: 'header' | 'card', w?: Wallet) {
 function disconnect() {
   const provider = S.provider
   stop(); unlisten(); unlisten = () => {}
-  S.account = S.provider = null; S.delegations = {}; S.walletMenu = ''
+  S.account = S.provider = null; S.delegations = {}; S.walletMenu = false
   store.set('safesync:wallet', '')
   // Wallets that support it forget this site as well, so the next Connect asks again.
   provider?.request?.({ method: 'wallet_revokePermissions', params: [{ eth_accounts: {} }] }).catch(() => {})
@@ -546,8 +546,8 @@ function disconnect() {
 }
 
 // A wallet menu closes on a click elsewhere, or Escape.
-document.addEventListener('click', e => { if (S.walletMenu && !(e.target as Element).closest?.('.wallet')) S.walletMenu = '', update() })
-document.addEventListener('keydown', e => { if (e.key === 'Escape' && S.walletMenu) S.walletMenu = '', update() })
+document.addEventListener('click', e => { if (S.walletMenu && !(e.target as Element).closest?.('.wallet')) S.walletMenu = false, update() })
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && S.walletMenu) S.walletMenu = false, update() })
 
 async function ensureChain(id: number) {
   const p = S.provider
@@ -1088,10 +1088,7 @@ function progressView() {
   const bar = html`<div class="bar"><i style=${`width:${yours.length ? Math.round((done / yours.length) * 100) : 0}%`}></i></div>`
   const cur = S.current
   return html`
-  ${!S.account ? html`<div class="row"><span class="wallet">
-      <button class="primary" aria-haspopup="menu" @click=${() => connect('card')}>Connect wallet</button>
-      ${S.walletMenu === 'card' ? walletMenu('card') : nothing}
-    </span></div>`
+  ${!S.account ? nothing
   : S.signing ? html`<div class="row"><b class="grow">${working} ${Math.min(done + 1, yours.length)} of ${yours.length}</b><button @click=${() => stop()}>Pause</button></div>
       ${bar}
       ${cur ? html`<div class="current">
@@ -1322,18 +1319,18 @@ function settingsView() {
 }
 
 /** Connected: the address (with copy) and Disconnect. Otherwise the wallets this browser has. */
-const walletMenu = (from: 'header' | 'card') => html`<div class="menu" role="menu">${S.account
+const walletMenu = () => html`<div class="menu" role="menu">${S.account
   ? html`<div class="row">${addr(S.account)}</div><button class="ghost" role="menuitem" @click=${disconnect}>Disconnect</button>`
-  : S.wallets.length ? S.wallets.map(w => html`<button class="ghost" role="menuitem" @click=${() => connect(from, w)}><img src=${w.info.icon} alt="">${w.info.name}</button>`)
+  : S.wallets.length ? S.wallets.map(w => html`<button class="ghost" role="menuitem" @click=${() => connect(w)}><img src=${w.info.icon} alt="">${w.info.name}</button>`)
   : html`<div class="muted small">No browser wallet found</div>`}</div>`
 
+/** The one place to connect, see the connected account, and disconnect. */
 function walletButton() {
-  const open = S.walletMenu === 'header'
   return html`<span class="wallet">
     ${S.account
-      ? html`<button class="account" aria-haspopup="menu" aria-expanded=${open} @click=${() => { S.walletMenu = open ? '' : 'header'; update() }}><i class="dot"></i><span class="mono">${short(S.account)}</span></button>`
-      : html`<button class="primary" aria-haspopup="menu" @click=${() => connect('header')}>Connect wallet</button>`}
-    ${open ? walletMenu('header') : nothing}
+      ? html`<button class="account" aria-haspopup="menu" aria-expanded=${S.walletMenu} @click=${() => { S.walletMenu = !S.walletMenu; update() }}><i class="dot"></i><span class="mono">${short(S.account)}</span></button>`
+      : html`<button aria-haspopup="menu" aria-expanded=${S.walletMenu} @click=${() => connect()}>Connect wallet</button>`}
+    ${S.walletMenu ? walletMenu() : nothing}
   </span>`
 }
 
