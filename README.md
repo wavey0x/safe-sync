@@ -135,13 +135,27 @@ bun test                         # unit tests + sandbox end-to-end (needs anvil)
 bun run build                    # dist/safe-sync.html + its sha256: host it anywhere static, publish the hash
 bun run dev                      # build and serve on http://localhost:5173
 bun scripts/validate-example.ts  # read-only check of the 27-Safe Curve rotation against live chains
-bun scripts/pick-rpcs.ts         # refresh src/chains.ts with CORS-capable public RPCs
+bun scripts/pick-rpcs.ts         # refresh src/chains.ts with public RPCs that answer a browser on the app's origin
 ```
 
 `src/safe.ts` is the core: finding Safes, per-Safe owner sync, the import conversion, hashing,
 simulation, signatures and the link format. `src/service.ts` is the Safe service client and
 `src/app.ts` the UI (lit-html). Wallet extensions don't inject into `file://` pages, so serve the file
 rather than opening it directly.
+
+## Host it
+
+It's one static file, so any HTTPS host works. Nothing needs a proxy: the Safe Transaction Service and
+the default RPCs allow any origin, and each user's browser makes its own calls (so Safe's rate limits
+are per user, not per site). This repo deploys to Vercel from `main`:
+
+- `vercel.json` serves `dist/safe-sync.html` exactly as committed, with no build on Vercel, so the
+  live file matches the sha256 the build printed. Rebuild and commit `dist` with every change.
+- Headers stop other sites from framing the signing page (`frame-ancestors 'none'`,
+  `X-Frame-Options`), and send no referrer.
+- Don't put a Safe API key in the build: anyone could read it. Users paste their own in Settings,
+  where it stays in their browser.
+- Links point at the site that made them, and each site keeps its own drafts and signature cache.
 
 ## Not supported, on purpose
 
