@@ -62,7 +62,7 @@ const S = {
   preparing: false, prepared: [] as Prepared[], errors: [] as string[], names: {} as Record<string, Address>, link: '',
   batch: null as Batch | null, id: '', rows: [] as Row[], loadError: '', pasted: '',
   wallets: [] as Wallet[], provider: null as any, account: null as Address | null, choosing: false,
-  signing: false, executing: false, waiting: false, current: null as Row | null, open: new Set<string>(), notice: '', copied: '' as '' | 'yes' | 'failed',
+  signing: false, executing: false, waiting: false, current: null as Row | null, open: new Set<string>(), copiedSafe: null as { key: string; ok: boolean } | null, notice: '', copied: '' as '' | 'yes' | 'failed',
   settingsOpen: false, settingsErrors: [] as string[], settings: store.get('safesync:settings', { rpc: '', service: '', apiKey: '' }),
 }
 
@@ -563,6 +563,21 @@ const safeLink = (tx: { chainId: number; safe: string }, hash?: string) => {
   if (c?.service) return `https://app.safe.global/${hash ? `transactions/tx?safe=${c.short}:${tx.safe}&id=multisig_${tx.safe}_${hash}` : `home?safe=${c.short}:${tx.safe}`}`
   return c?.explorer ? `${c.explorer}/address/${tx.safe}` : undefined
 }
+/** A Safe's address in a list: opens the Safe in Safe{Wallet} (or the explorer), with a copy button that answers with a check. */
+function safeAddr(chainId: number, safe: string, labels: Record<string, string>) {
+  const link = safeLink({ chainId, safe }), key = keyOf({ chainId, safe }), c = S.copiedSafe?.key === key ? S.copiedSafe : null
+  const stop = (e: Event) => e.stopPropagation() // the row itself opens and closes
+  const copied = (ok: boolean) => { S.copiedSafe = { key, ok }; update(); setTimeout(() => { if (S.copiedSafe?.key === key) (S.copiedSafe = null), update() }, 1500) }
+  return html`<span class="safe-addr">
+    ${link ? html`<a class="mono" href=${link} target="_blank" rel="noopener" title=${safe} @click=${stop}>${short(safe)}</a>` : html`<span class="mono" title=${safe}>${short(safe)}</span>`}
+    ${labels[safe.toLowerCase()] ? html`<span class="label">${labels[safe.toLowerCase()]}</span>` : nothing}
+    <button class=${`ghost copy ${c ? (c.ok ? 'ok' : 'failed') : ''}`} title=${c && !c.ok ? "Couldn't copy" : 'Copy address'} aria-label=${c?.ok ? 'Copied' : 'Copy address'}
+      @click=${(e: Event) => { stop(e); navigator.clipboard.writeText(safe).then(() => copied(true), () => copied(false)) }}>
+      ${c?.ok ? html`<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-6.5"/></svg>`
+      : html`<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V4A1.5 1.5 0 0 0 9 2.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5"/></svg>`}
+    </button>
+  </span>`
+}
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 const fmt = ([t, n]: [number, number]) => `${t}-of-${n}`
 const argValue = (v: string, labels: Record<string, string>) => (isAddress(v) ? addr(v, labels) : v === 'this Safe' ? html`<b>this Safe</b>` : html`<span class="mono wrap">${v}</span>`)
@@ -805,7 +820,7 @@ function reviewStage() {
       return html`<tr class=${p.tx ? 'click' : ''} @click=${toggle}>
         <td class="ico-cell">${k === 'ready' ? html`<span class="ico todo" title="Needs signatures"></span>` : k === 'synced' ? html`<span class="ico idle" title="Already in sync">–</span>` : k === 'attention' ? html`<span class="ico warn" title="Needs attention">!</span>` : html`<span class="ico now"></span>`}</td>
         <td>${chainChip(p.chainId)}</td>
-        <td>${addr(p.safe, labels)}</td>
+        <td>${safeAddr(p.chainId, p.safe, labels)}</td>
         <td class="grow-cell small">
           ${p.error ? html`<span class="bad">${p.error}</span>` : p.skip ? html`<span class="muted">${p.skip}</span>` : nothing}
           ${only ? html`<span>${only}</span>` : nothing}
@@ -914,7 +929,7 @@ function batchView() {
       return html`<tr class=${`click ${r === S.current ? 'active' : ''}`} @click=${toggle}>
         <td class="ico-cell">${icon(r, st.kind)}</td>
         <td>${chainChip(r.tx.chainId)}</td>
-        <td>${addr(r.tx.safe)}</td>
+        <td>${safeAddr(r.tx.chainId, r.tx.safe, b.labels)}</td>
         <td class="grow-cell">
           <span class=${KIND_CLASS[st.kind]}>${r === S.current && r.phase ? r.phase : st.text}</span>
           ${except(S.rows.indexOf(r)) ? html`<div class="small">${except(S.rows.indexOf(r))}</div>` : nothing}

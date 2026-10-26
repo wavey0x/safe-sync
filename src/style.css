@@ -85,6 +85,15 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .owner-chip { display: inline-flex; gap: 4px; align-items: center; border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; font-size: 13px; }
 .owner-chip.in { border-color: var(--good); } .owner-chip.out { border-color: var(--bad); }
 .owner-changes { display: grid; gap: 6px; }
+.safe-addr { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; }
+.safe-addr a { color: inherit; text-decoration: underline dotted var(--line); text-underline-offset: 3px; }
+.safe-addr a:hover { color: var(--accent); text-decoration-color: currentColor; }
+.copy { padding: 3px; display: inline-grid; place-items: center; }
+.copy:hover:not(:disabled) { border-color: transparent; } .copy:not(.ok, .failed):hover { color: var(--fg); }
+.copy svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.copy.ok { color: var(--good); } .copy.failed { color: var(--bad); }
+.copy.ok path { stroke-dasharray: 14; stroke-dashoffset: 14; animation: draw .3s ease-out forwards; }
+@keyframes draw { to { stroke-dashoffset: 0; } }
 .segs { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; padding: 2px; gap: 2px; }
 .seg { border: 0; background: transparent; color: var(--muted); padding: 6px 12px; }
 .seg.on { background: var(--active); color: var(--fg); }
@@ -109,7 +118,7 @@ pre { margin: 6px 0 0; white-space: pre-wrap; }
 .ico.now { border: 2px solid var(--accent); border-top-color: transparent; animation: spin .8s linear infinite; }
 @keyframes pop { 0% { transform: scale(.3); } 70% { transform: scale(1.2); } 100% { transform: scale(1); } }
 @keyframes spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .ico, .bar i { animation: none !important; transition: none; } }
+@media (prefers-reduced-motion: reduce) { .ico, .bar i { animation: none !important; transition: none; } .copy.ok path { animation: none; stroke-dasharray: none; } }
 
 /* Tables */
 .scroll { overflow-x: auto; }
