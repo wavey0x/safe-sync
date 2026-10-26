@@ -10,11 +10,12 @@ HTML file: no server, no database, no accounts.
 
 ## Use it
 
-**Proposer**
+**Proposer**: three steps, each on its own screen with Back and the next step at the bottom. The
+browser's Back and Forward move between them, and a reload stays on the step you were on.
 
 1. **Safe:** paste its address. It's looked up on every chain, and each chain it's on shows up as a
    chip; click a chip to leave that chain out. **+ Another address** adds a Safe that was deployed at a
-   different address on some chains.
+   different address on some chains. **Continue** once at least one is selected.
 2. **Change**, one of two kinds:
    - **Owners:** the owners of the Safe most chains share are copied in once ("Starting from …"),
      then you edit them: *Replace* or *Remove* any, *+ Add owner* (address or name.eth), and set
@@ -25,13 +26,15 @@ HTML file: no server, no database, no accounts.
    - **Other transaction:** paste a Safe{Wallet} transaction link or a Transaction Builder JSON. Owner
      changes in it are redone per Safe, and the source Safe's own address becomes each Safe's.
      DELEGATECALLs are refused, and every call target must exist on each chain.
-3. **Review:** each Safe is built, simulated from its own context, and hash-checked against the Safe
-   contract. For owner changes the review shows the owners every Safe ends up with and the signatures
-   needed, read back from the calldata. A Safe that needs something different says so on its row.
-   Results come back as ready, already in sync, or needs attention; exact calldata sits behind
-   *Technical details*.
-4. **Copy signing link** creates the link and copies it ("Copied ✓"); *Sign now* opens it. Editing
-   anything throws the results away, so a link never carries stale transactions.
+3. **Review N Safes** checks the change first. Then each Safe is built, simulated from its own
+   context, and hash-checked against the Safe contract. For owner changes the review shows the owners
+   every Safe ends up with (new ones marked *added*, dropped ones listed as *Removed*) and the
+   signatures needed, read back from the calldata. A Safe that needs something different says so on
+   its row. Results come back as ready, already in sync, or needs attention; exact calldata sits
+   behind *Technical details*.
+4. **Copy signing link** creates the link and copies it ("Copied ✓"); *Sign now* opens it. Going back
+   without changing anything keeps the results; any edit throws them away, so a link never carries
+   stale transactions. *Edit* on a signing link reopens its change at step 2.
 
 **Signers**: open the link, check the code next to the title with whoever sent it, connect, then click **Sign N**. The title says what the link does ("Replace 2 owners on 15 Safes").
 

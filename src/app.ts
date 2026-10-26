@@ -37,6 +37,7 @@ type Draft = {
   source: string
 }
 type Pick = Found & { selected: boolean }
+type Stage = 1 | 2 | 3 // Safe, Change, Review
 
 let storageOk = true
 const store = {
@@ -55,7 +56,7 @@ const asDraft = (d: Omit<Partial<Draft>, 'safes'> & { safes?: unknown }): Draft 
 const keyOf = (f: { chainId: number; safe: string }) => `${f.chainId}:${f.safe}`
 
 const S = {
-  mode: 'compose' as 'compose' | 'batch',
+  mode: 'compose' as 'compose' | 'batch', stage: 1 as Stage,
   d: asDraft(store.get<Partial<Draft>>('safesync:draft', {})),
   found: [] as Pick[], looking: new Set<string>(), lines: '', sourceNote: '',
   preparing: false, prepared: [] as Prepared[], errors: [] as string[], names: {} as Record<string, Address>, link: '',
@@ -147,7 +148,7 @@ function removeSafe(i: number) {
   edited()
 }
 
-const lookupAll = () => [...new Set(S.d.safes.map(addressIn).filter((a): a is Address => !!a))].forEach(lookup)
+const lookupAll = () => Promise.all([...new Set(S.d.safes.map(addressIn).filter((a): a is Address => !!a))].map(lookup))
 
 async function retry(p: Pick) {
   p.error = undefined; update()
@@ -181,6 +182,29 @@ function targetOwners() {
 }
 
 const validOwner = (s: string) => isAddress(s) || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.eth$/i.test(s)
+
+// ---------------------------------------------------------------- compose: stages
+
+/** Change needs a selected Safe; Review also needs a complete change. */
+const reachable = (n: Stage) => n === 1 || (selected().length > 0 && (n === 2 || !actionsFor().errors.length))
+
+/** Each move is a browser history entry, so the browser's Back and Forward step through the stages too. */
+function goTo(n: Stage) {
+  if (n === 3) { const a = actionsFor(); if (a.errors.length) return void ((S.errors = a.errors), update()) }
+  if (n > 1 && !selected().length) return
+  // Stepping back to the stage we came from is the browser's Back, so history doesn't fill with repeats.
+  if (n < S.stage && history.state?.prev === n) return history.back()
+  history.pushState({ stage: n, prev: S.stage }, '', location.pathname + location.search)
+  S.stage = n; S.errors = []
+  resume(); update(); scrollTo(0, 0)
+}
+
+/** Once the Safes are found (again): no Safe selected sends you back to Safe, and Review builds its results. */
+function resume() {
+  if (S.mode !== 'compose' || S.looking.size) return
+  if (S.stage > 1 && !selected().length) { S.stage = 1; history.replaceState({ stage: 1 }, '', location.pathname + location.search); update() }
+  else if (S.stage === 3 && !S.prepared.length && !S.preparing) prepare()
+}
 
 // ---------------------------------------------------------------- compose: replicate a transaction
 
@@ -517,9 +541,9 @@ function edit() {
   stop()
   const src = S.batch.src as Partial<Draft> | null
   S.d = asDraft(src && typeof src === 'object' ? src : {})
-  history.pushState(null, '', location.pathname + location.search)
-  S.mode = 'compose'; S.found = []; edited()
-  lookupAll()
+  history.pushState({ stage: 2 }, '', location.pathname + location.search)
+  S.mode = 'compose'; S.stage = 2; S.found = []; edited()
+  lookupAll().then(resume)
   if (S.d.mode === 'replicate' && S.d.source) loadSource()
 }
 
@@ -637,7 +661,7 @@ function reviewView(items: Item[], labels: Record<string, string>) {
   for (const { tx } of items) payloads.set(payloadKey(tx), [...(payloads.get(payloadKey(tx)) ?? []), tx])
   return html`<div class="change">
     <div class="muted small">Owners after, on all ${plural(items.length, 'Safe')}</div>
-    <div class="chips">${final.owners.map(o => html`<span class=${`owner-chip ${before.includes(o) ? '' : 'new'}`}>${addr(getAddress(o), labels)}${before.includes(o) ? nothing : html` <b class="good">new</b>`}</span>`)}</div>
+    <div class="chips">${final.owners.map(o => html`<span class=${`owner-chip ${before.includes(o) ? '' : 'new'}`}>${addr(getAddress(o), labels)}${before.includes(o) ? nothing : html` <b class="good">added</b>`}</span>`)}</div>
     ${removed.length ? html`<div class="chips"><span class="muted small">Removed</span>${removed.map(o => html`<span class="owner-chip gone">${addr(getAddress(o), labels)}</span>`)}</div>` : nothing}
     <div class="result">${final.threshold} of ${final.owners.length} signatures needed${first.threshold !== final.threshold || before.length !== final.owners.length ? html` <span class="muted">(was ${first.threshold} of ${before.length})</span>` : nothing}</div>
     <details><summary>Technical details</summary>
@@ -679,14 +703,14 @@ function titleFor(items: Item[]): string {
   return `${t[0].toUpperCase()}${t.slice(1)} on ${plural(txs.length, 'Safe')}`
 }
 
-function safesCard() {
+function safesBody() {
   const key = (o: string[]) => o.map(a => a.toLowerCase()).sort().join(), start = key(S.d.owners.flatMap(r => (r.from ? [r.from] : [])))
   const differs = (f: Pick) => S.d.mode === 'owners' && f.selected && !!f.state && !!S.d.owners.length && key(f.state.owners) !== start
   const block = (raw: string, i: number) => {
     const a = addressIn(raw), list = S.found.filter(f => f.safe === a), ok = list.filter(f => f.state), bad = list.filter(f => !f.state)
     return html`<div class="found">
       <div class="row">
-        <input class="grow mono" spellcheck="false" placeholder="0x…" aria-label=${i ? 'Another Safe address' : 'Safe address'} .value=${live(raw)} @input=${(e: any) => setSafe(i, e.target.value)}>
+        <input class="grow mono" spellcheck="false" placeholder="Safe address, 0x…" aria-label=${i ? 'Another Safe address' : 'Safe address'} .value=${live(raw)} @input=${(e: any) => setSafe(i, e.target.value)}>
         ${i ? html`<button class="ghost" aria-label="Remove this address" @click=${() => removeSafe(i)}>✕</button>` : nothing}
       </div>
       ${raw.trim() && !a ? html`<div class="small bad">Not an address</div>`
@@ -698,33 +722,31 @@ function safesCard() {
       ${bad.length ? html`<div class="chips">${bad.map(f => html`<button class="pick unreachable" title=${`Couldn't reach this chain: ${f.error ?? ''}`} @click=${() => retry(f)}>${chainOf(f.chainId)?.short ?? f.chainId} ↻</button>`)}</div>` : nothing}
     </div>`
   }
-  return html`<section class="card">
-    <h3>Safe</h3>
+  return html`
     ${S.d.safes.map(block)}
-    ${S.found.some(f => f.state) ? html`<div><button class="ghost" @click=${() => { S.d.safes.push(''); edited() }}>+ Another address</button></div>` : nothing}
-  </section>`
+    ${S.found.some(f => f.state) ? html`<div><button class="ghost" @click=${() => { S.d.safes.push(''); edited() }}>+ Another address</button></div>` : nothing}`
 }
 
 function ownersEditor() {
   const t = targetOwners(), start = S.found.find(f => keyOf(f) === S.d.startedFrom)
-  const set = (i: number, patch: Partial<OwnerRow>) => { Object.assign(S.d.owners[i], patch); edited() }
+  const changed = () => { S.errors = []; edited() } // a fix clears the complaint; Review checks again
+  const set = (i: number, patch: Partial<OwnerRow>) => { Object.assign(S.d.owners[i], patch); changed() }
   return html`
     ${start ? html`<div class="muted small">Starting from ${chainChip(start.chainId)} ${addr(start.safe)}</div>` : nothing}
     <div class="owners">${S.d.owners.map((r, i) => r.from ? html`<div class="owner">
         <span class=${r.to === null ? 'mono gone' : 'mono'} title=${r.from}>${short(r.from)}</span>
         ${r.to === r.from ? html`<span></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: '', at: Date.now() })}>Replace</button><button class="ghost" @click=${() => set(i, { to: null })}>Remove</button></span>`
         : r.to === null ? html`<span></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: r.from, at: undefined })}>Undo</button></span>`
-        : html`<span class="swap"><span class="muted">→</span><input class="mono" placeholder="New owner (0x… or name.eth)" .value=${live(r.to)} @input=${(ev: any) => { r.to = ev.target.value; edited() }}></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: r.from, at: undefined })}>Undo</button></span>`}
+        : html`<span class="swap"><span class="muted">→</span><input class="mono" placeholder="Replacement (0x… or name.eth)" .value=${live(r.to)} @input=${(ev: any) => { r.to = ev.target.value; changed() }}></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: r.from, at: undefined })}>Undo</button></span>`}
       </div>` : html`<div class="owner">
-        <span class="good small">New owner</span>
-        <input class="mono" placeholder="0x… or name.eth" .value=${live(r.to ?? '')} @input=${(ev: any) => { r.to = ev.target.value; edited() }}>
-        <span class="actions"><button class="ghost" aria-label="Don't add" @click=${() => { S.d.owners.splice(i, 1); edited() }}>✕</button></span>
+        <span class="swap add"><span class="good" aria-hidden="true">+</span><input class="mono" placeholder="Address to add (0x… or name.eth)" aria-label="Owner to add" .value=${live(r.to ?? '')} @input=${(ev: any) => { r.to = ev.target.value; changed() }}></span>
+        <span class="actions"><button class="ghost" aria-label="Don't add" @click=${() => { S.d.owners.splice(i, 1); changed() }}>✕</button></span>
       </div>`)}
     </div>
     <div class="row">
-      <button class="ghost" @click=${() => { S.d.owners.push({ to: '' }); edited() }}>+ Add owner</button>
+      <button class="ghost" @click=${() => { S.d.owners.push({ to: '' }); changed() }}>+ Add owner</button>
       <span class="grow"></span>
-      <label class="check">Signatures needed <input class="num" type="number" min="1" max=${t.owners.length} .value=${live(String(t.threshold))} @input=${(e: any) => { S.d.threshold = Number(e.target.value) || null; edited() }}> of ${t.owners.length}</label>
+      <label class="check">Signatures needed <input class="num" type="number" min="1" max=${t.owners.length} .value=${live(String(t.threshold))} @input=${(e: any) => { S.d.threshold = Number(e.target.value) || null; changed() }}> of ${t.owners.length}</label>
     </div>`
 }
 
@@ -735,25 +757,45 @@ function replicateEditor() {
     ${S.lines ? html`<div class="small good">✓ ${S.sourceNote}</div>` : nothing}`
 }
 
-function composeView() {
+const STAGES = ['Safe', 'Change', 'Review']
+function stageBar(stage: Stage) {
+  return html`<nav class="stages" aria-label="Steps">${STAGES.map((label, i) => {
+    const n = (i + 1) as Stage
+    return html`${i ? html`<span class=${`stage-line ${n <= stage ? 'done' : ''}`}></span>` : nothing}
+      <button class=${`stage ${n === stage ? 'on' : n < stage ? 'done' : ''}`} aria-current=${n === stage ? 'step' : nothing}
+        ?disabled=${n > stage && !reachable(n)} @click=${() => n !== stage && goTo(n)}><span class="stage-n">${n}</span>${label}</button>`
+  })}</nav>`
+}
+const footer = (back: Stage | 0, next: TemplateResult) =>
+  html`<div class="footer">${back ? html`<button class="ghost" @click=${() => goTo(back)}>← Back</button>` : nothing}<span class="grow"></span>${next}</div>`
+const errorList = () => (S.errors.length ? html`<div class="errors">${S.errors.map(e => html`<div>${e}</div>`)}</div>` : nothing)
+
+function safeStage() {
+  const n = selected().length
+  return html`<section class="card">
+    ${safesBody()}
+    ${footer(0, html`<button class="primary" ?disabled=${!n} @click=${() => goTo(2)}>Continue${n ? ` with ${plural(n, 'Safe')}` : ''}</button>`)}
+  </section>`
+}
+
+function changeStage() {
+  const mode = (m: Draft['mode'], label: string) => html`<button class=${S.d.mode === m ? 'seg on' : 'seg'} aria-pressed=${S.d.mode === m} @click=${() => { S.d.mode = m; edited() }}>${label}</button>`
+  return html`<section class="card">
+    <div class="row"><span class="segs">${mode('owners', 'Owners')}${mode('replicate', 'Other transaction')}</span></div>
+    ${S.d.mode === 'owners' ? ownersEditor() : replicateEditor()}
+    ${errorList()}
+    ${footer(1, html`<button class="primary" ?disabled=${S.d.mode === 'replicate' && !S.lines} @click=${() => goTo(3)}>Review ${plural(selected().length, 'Safe')}</button>`)}
+  </section>`
+}
+
+function reviewStage() {
   const by = (k: string) => S.prepared.filter(p => prepKind(p) === k)
   const ready = by('ready'), synced = by('synced'), attention = by('attention'), loading = by('loading')
   const labels = Object.fromEntries(Object.entries(S.names).map(([n, a]) => [a.toLowerCase(), n]))
   const items: Item[] = ready.map(p => ({ tx: p.tx!, owners: p.state?.owners, threshold: p.state?.threshold }))
   const except = exceptions(items)
-  const mode = (m: Draft['mode'], label: string) => html`<button class=${S.d.mode === m ? 'seg on' : 'seg'} aria-pressed=${S.d.mode === m} @click=${() => { S.d.mode = m; edited() }}>${label}</button>`
-  const n = selected().length
-  return html`
-  ${safesCard()}
-  ${n ? html`<section class="card">
-    <div class="row"><h3 class="grow">Change</h3><span class="segs">${mode('owners', 'Owners')}${mode('replicate', 'Other transaction')}</span></div>
-    ${S.d.mode === 'owners' ? ownersEditor() : replicateEditor()}
-    ${S.errors.length ? html`<div class="errors">${S.errors.map(e => html`<div>${e}</div>`)}</div>` : nothing}
-    <div class="row"><span class="grow"></span><button class="primary" @click=${prepare} ?disabled=${S.preparing}>${S.preparing ? 'Checking…' : `Review ${plural(n, 'Safe')}`}</button></div>
-  </section>` : S.errors.length ? html`<div class="errors">${S.errors.map(e => html`<div>${e}</div>`)}</div>` : nothing}
-
-  ${S.prepared.length ? html`
-  <section class="card">
+  return html`<section class="card">
+    ${!S.prepared.length ? html`<div class="muted">${S.preparing || S.looking.size ? 'Checking every Safe…' : ''}</div>` : html`
     <div class="summary">
       <span>${ready.length} ready to sign</span>
       ${synced.length ? html` · <span class="muted">${synced.length} already in sync</span>` : nothing}
@@ -776,14 +818,15 @@ function composeView() {
         </td>
       </tr>`
     })}</tbody></table></div>
-    <div class="row">
-      <span class="grow"></span>
+    ${S.link ? html`<input readonly class="mono small" aria-label="Signing link" .value=${live(S.link)} @focus=${(e: any) => e.target.select()}>` : nothing}`}
+    ${errorList()}
+    ${footer(2, html`
       ${S.link ? html`<a class="button" href=${S.link}>Sign now</a>` : nothing}
-      <button class=${S.copied === 'failed' ? 'bad-btn' : 'primary'} @click=${copyLink} ?disabled=${S.preparing || !ready.length}>${S.copied === 'yes' ? 'Copied ✓' : S.copied === 'failed' ? 'Copy failed' : 'Copy signing link'}</button>
-    </div>
-    ${S.link ? html`<input readonly class="mono small" aria-label="Signing link" .value=${live(S.link)} @focus=${(e: any) => e.target.select()}>` : nothing}
-  </section>` : nothing}`
+      <button class=${S.copied === 'failed' ? 'bad-btn' : 'primary'} @click=${copyLink} ?disabled=${S.preparing || !ready.length}>${S.copied === 'yes' ? 'Copied ✓' : S.copied === 'failed' ? 'Copy failed' : 'Copy signing link'}</button>`)}
+  </section>`
 }
+
+const composeView = () => html`${stageBar(S.stage)}${S.stage === 1 ? safeStage() : S.stage === 2 ? changeStage() : reviewStage()}`
 
 // ---------------------------------------------------------------- batch view
 
@@ -934,23 +977,24 @@ function settingsView() {
 function view(): TemplateResult {
   return html`
   <header>
-    <a class="brand grow" href=${location.pathname + location.search} @click=${(e: Event) => { if (S.mode === 'batch') { e.preventDefault(); history.pushState(null, '', location.pathname + location.search); S.mode = 'compose'; update() } }}>Safe Sync</a>
+    <a class="brand grow" href=${location.pathname + location.search} @click=${(e: Event) => { e.preventDefault(); if (S.mode === 'compose') return void (S.stage > 1 && goTo(1)); history.pushState({ stage: 1 }, '', location.pathname + location.search); route() }}>Safe Sync</a>
     <button class="ghost" @click=${() => { S.settingsOpen = true; update() }}>Settings</button>
   </header>
-  <main>${S.mode === 'batch' ? batchView() : composeView()}</main>
+  <main class=${S.mode === 'compose' ? 'narrow' : ''}>${S.mode === 'batch' ? batchView() : composeView()}</main>
   ${S.settingsOpen ? settingsView() : nothing}`
 }
 
 function route() {
   const h = location.hash.slice(1)
-  if (h) openBatch(h)
-  else {
-    S.mode = 'compose'; update()
-    if (!S.found.length) lookupAll()
-    if (S.d.mode === 'replicate' && S.d.source && !S.lines) loadSource()
-  }
+  if (h) return void openBatch(h)
+  S.mode = 'compose'; S.errors = []
+  S.stage = ([1, 2, 3].includes(history.state?.stage) ? history.state.stage : 1) as Stage
+  update()
+  Promise.all([S.found.length ? null : lookupAll(), S.d.mode === 'replicate' && S.d.source && !S.lines ? loadSource() : null]).then(resume)
 }
-window.addEventListener('hashchange', route)
+// Leaving a link fires both events: each one handles its own direction, so a move routes once.
+window.addEventListener('hashchange', () => { if (location.hash) route() })
+window.addEventListener('popstate', () => { if (!location.hash) route() })
 // Signatures are kept in localStorage and re-uploaded on the next visit; only warn mid-session.
 window.addEventListener('beforeunload', e => { if (S.signing || S.executing || S.waiting) e.preventDefault() })
 route()

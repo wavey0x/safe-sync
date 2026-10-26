@@ -205,10 +205,12 @@ if (import.meta.main) {
     return { address: a.address, label: owner >= 0 ? `Owner ${owner + 1}${signers.includes(a.address) ? ' (yours)' : ''}` : incoming >= 0 ? `Incoming owner ${incoming + 1}` : 'Not an owner' }
   })
   const draft = { mode: 'owners', source: '', excluded: [], ...sb.draft }
-  const boot = `window.__SANDBOX__=${JSON.stringify({ runId, rpcs: sb.rpc, accounts: labels, settings: sb.settings, draft, walletOnly: !simple })};\n${await Bun.file(`${root}test/sandbox-wallet.js`).text()}`
+  const cfg = `window.__SANDBOX__=${JSON.stringify({ runId, rpcs: sb.rpc, accounts: labels, settings: sb.settings, draft, walletOnly: !simple })};`
   const server = Bun.serve({
     port,
     async fetch() {
+      // Read on every request, so a rebuild (or a wallet edit) shows on reload.
+      const boot = `${cfg}\n${await Bun.file(`${root}test/sandbox-wallet.js`).text()}`
       const html = (await Bun.file(`${root}dist/safe-sync.html`).text()).replace('<head>', () => `<head><script>${boot}</script>`)
       return new Response(html, { headers: { 'content-type': 'text/html' } })
     },

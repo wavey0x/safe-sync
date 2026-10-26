@@ -69,6 +69,10 @@
   select.value = account
   select.onchange = () => { account = select.value; emit('accountsChanged', [account.toLowerCase()]) }
   box.querySelector('input').onchange = e => (rejectNext = e.target.checked)
-  // Outside <body>, which the app renders into.
-  addEventListener('DOMContentLoaded', () => document.documentElement.appendChild(box))
+  // Outside <body>, which the app renders into, with room below the page so it never covers the app's buttons.
+  addEventListener('DOMContentLoaded', () => {
+    document.documentElement.appendChild(box)
+    const room = () => (document.documentElement.style.paddingBottom = box.offsetHeight + 24 + 'px')
+    room(); addEventListener('resize', room)
+  })
 })()
