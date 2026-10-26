@@ -746,10 +746,10 @@ const addr = (a: string, labels: Record<string, string> = S.batch?.labels ?? {},
 const chainChip = (id: number) => html`<span class="chip" data-tip=${chainName(id)}>${chainOf(id)?.short ?? id}</span>`
 const safeLink = (tx: { chainId: number; safe: string }, hash?: string) => {
   const c = chainOf(tx.chainId), s = c?.service
-  if (s) return `${s.app}/${hash ? `transactions/tx?safe=${s.prefix}:${tx.safe}&id=multisig_${tx.safe}_${hash}` : `home?safe=${s.prefix}:${tx.safe}`}`
+  if (s) return `${s.app}/${hash ? `transactions/tx?safe=${s.prefix}:${tx.safe}&id=multisig_${tx.safe}_${hash}` : `transactions/queue?safe=${s.prefix}:${tx.safe}`}`
   return c?.explorer ? `${c.explorer}/address/${tx.safe}` : undefined
 }
-/** A Safe's address in a list: opens the Safe in Safe{Wallet} (or the explorer), with a copy button. */
+/** A Safe's address in a list: opens its Safe{Wallet} transaction queue (or the explorer), with a copy button. */
 function safeAddr(chainId: number, safe: string, labels: Record<string, string>) {
   const link = safeLink({ chainId, safe })
   return html`<span class="addr">
