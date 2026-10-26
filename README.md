@@ -1,6 +1,6 @@
 # Safe Sync
 
-Keep a Safe the same on every chain. **Use it: https://safe-sync-seven.vercel.app**
+Keep a Safe the same on every chain. **Use it: https://safe-sync.wavey.info**
 
 A team's Safe often lives at one address on 20+ chains. Rotating a signer, or making any other
 change, normally means building the same transaction 20 times. Then every signer clicks through 20
