@@ -149,8 +149,10 @@ tr:hover .refresh, .refresh:focus-visible { opacity: 1; }
 .busy { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
 .busy .spin { width: 10px; height: 10px; border-width: 1.5px; }
 button:disabled:has(.spin) { opacity: .75; cursor: progress; }
-.close { padding: 6px; } .close:hover:not(:disabled) { color: var(--fg); }
+/* Icon-only buttons: the Settings ✕ and the header's gear */
+.close, .icon-btn { padding: 6px; } :is(.close, .icon-btn):hover:not(:disabled) { color: var(--fg); }
 .close svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; }
+.icon-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 
 /* Tooltips: one element, placed by app.ts above (or below) whatever [data-tip] is hovered or focused */
 .tip { position: fixed; left: 0; top: 0; z-index: 30; max-width: min(300px, calc(100vw - 16px)); padding: 6px 10px; border-radius: 8px;
