@@ -7,7 +7,7 @@ import { CHAINS } from './chains'
 import {
   applyOps, batchId, chainName, chainOf, client, config, decodeBatch, describe, domainHash, encodeBatch, execData, findSafe, linesFromTx,
   linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, pickNonce, prepareTarget, readSafe, resolveNames,
-  ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, settingsFrom, short, sigOwner, walletTypedData,
+  ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, settingsFrom, short, sigOwner, walletTypedData, ZERO,
   type Action, type Batch, type Found, type NonceChoice, type OwnerOp, type Prepared, type Queued, type Step, type Target, type Tx,
 } from './safe'
 import * as svc from './service'
@@ -736,6 +736,8 @@ function copyButton(text: string, label = 'Copy address') {
     <svg class="check-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-6.5"/></svg>
   </button>`
 }
+/** A long value in full, with a copy button after it. */
+const copyable = (v: string, label: string) => html`<span><span class="mono wrap">${v}</span>${copyButton(v, label)}</span>`
 /** A row's open/close toggle: a chevron that turns down when open. The click doesn't also reach the row's own toggle. */
 const disclose = (open: boolean, label: string, toggle: () => void) => html`<button class="ghost disclose" aria-expanded=${open} aria-label=${label} @click=${(e: Event) => { e.stopPropagation(); toggle() }}>
   <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5l4.5 4.5L6 12.5"/></svg>
@@ -1191,17 +1193,18 @@ function batchView() {
         </td>
       </tr>
       ${r.open ? html`<tr class="details"><td></td><td colspan="4">
-        ${actionsView(r.tx, b.labels)}
+        <div class="actions-detail">${steps(describe(r.tx), b.labels)}</div>
         <div class="kv">
           <span>nonce</span><span class="mono">${r.tx.nonce}</span>
-          <span>to</span><span><span class="mono wrap">${r.tx.to}</span>${copyButton(r.tx.to)}</span>
+          <span>to</span>${copyable(r.tx.to, 'Copy address')}
           <span>value</span><span class="mono">${r.tx.value}</span>
           <span>operation</span><span>${r.tx.operation === 1 ? 'DELEGATECALL (1)' : 'CALL (0)'}</span>
-          <span>data</span><span class="mono wrap">${r.tx.data} <a class="nowrap" href=${`https://safe.eth.sh/calldata-decoder?calldata=${encodeURIComponent(r.tx.data)}`} target="_blank" rel="noopener noreferrer" title="Decode in ETH.sh">View on ETH.sh ↗</a></span>
-          <span>gas and refund</span><span class="mono">all zero</span>
-          <span>safeTxHash</span><span class="mono wrap">${r.hash}</span>
-          <span>domain hash</span><span class="mono wrap">${domainHash(r.tx)}</span>
-          <span>message hash</span><span class="mono wrap">${messageHash(r.tx)}</span>
+          <span>data</span><span><span class="mono wrap">${r.tx.data}</span>${copyButton(r.tx.data, 'Copy data')} <a class="nowrap" href=${`https://safe.eth.sh/calldata-decoder?calldata=${encodeURIComponent(r.tx.data)}`} target="_blank" rel="noopener noreferrer" title="Decode in ETH.sh">View on ETH.sh ↗</a></span>
+          <span>gas and refund</span><span class="fields">${[['safeTxGas', '0'], ['baseGas', '0'], ['gasPrice', '0'], ['gasToken', ZERO], ['refundReceiver', ZERO]].map(([k, v]) =>
+            html`<span><span class="muted">${k}</span> <span class="mono" data-tip=${v.length > 12 ? v : nothing}>${short(v)}</span></span>`)}</span>
+          <span>safeTxHash</span>${copyable(r.hash, 'Copy safeTxHash')}
+          <span>domain hash</span>${copyable(domainHash(r.tx), 'Copy domain hash')}
+          <span>message hash</span>${copyable(messageHash(r.tx), 'Copy message hash')}
           <span>signed by</span><span>${validSigs(r).map(x => html`<div>${addr(x.owner)}${r.svc === 'ok' && !x.posted ? html` <span class="warn">not uploaded</span>` : nothing}</div>`)}</span>
           ${r.svc === 'none' && needsWork(r) ? html`<span>add signatures</span><span class="row">
             <textarea class="grow mono small" rows="1" aria-label="Paste signatures" placeholder="Signatures copied from another signer" .value=${live(S.pasted)} @input=${(e: any) => { S.pasted = e.target.value; update() }}></textarea>
