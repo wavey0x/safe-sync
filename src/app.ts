@@ -6,7 +6,7 @@ import { getAddress, isAddress, toHex, type Address, type Hex } from 'viem'
 import { CHAINS } from './chains'
 import {
   applyOps, batchId, chainName, chainOf, client, config, decodeBatch, describe, domainHash, encodeBatch, execData, findSafe, linesFromTx,
-  linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, payloadKey, prepareTarget, readSafe, resolveNames,
+  linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, prepareTarget, readSafe, resolveNames,
   ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, short, sigOwner, walletTypedData,
   type Action, type Batch, type Found, type OwnerOp, type Prepared, type Step, type Tx,
 } from './safe'
@@ -62,7 +62,7 @@ const S = {
   preparing: false, prepared: [] as Prepared[], errors: [] as string[], names: {} as Record<string, Address>, link: '',
   batch: null as Batch | null, id: '', rows: [] as Row[], loadError: '', pasted: '',
   wallets: [] as Wallet[], provider: null as any, account: null as Address | null, choosing: false,
-  signing: false, executing: false, waiting: false, current: null as Row | null, notice: '', copied: '' as '' | 'yes' | 'failed',
+  signing: false, executing: false, waiting: false, current: null as Row | null, open: new Set<string>(), notice: '', copied: '' as '' | 'yes' | 'failed',
   settingsOpen: false, settingsErrors: [] as string[], settings: store.get('safesync:settings', { rpc: '', service: '', apiKey: '' }),
 }
 
@@ -578,6 +578,12 @@ function steps(list: Step[], labels: Record<string, string>) {
   </li>`)}</ol>`
 }
 
+/** What one Safe's transaction does, as exact steps: the detail behind each row. */
+const actionsView = (tx: Tx, labels: Record<string, string>) => html`<div class="actions-detail">
+  ${steps(describe(tx), labels)}
+  ${tx.operation === 1 ? html`<div class="muted small">Sent through MultiSendCallOnly ${short(tx.to)} (delegatecall), so the inner calls run as the Safe.</div>` : nothing}
+</div>`
+
 const OWNER_FNS = ['swapOwner', 'addOwnerWithThreshold', 'removeOwner', 'changeThreshold']
 
 /** One plain-language line per step. Owner changes ignore encoding details such as prevOwner; calls keep their arguments. */
@@ -596,7 +602,7 @@ function intent(s: Step, labels: Record<string, string>): { key: string; view: T
   }
 }
 
-/** The intended change in plain language, grouped across Safes; exact encodings behind a toggle. */
+/** The intended change in plain language, grouped across Safes; each row opens to its exact steps. */
 function changeView(txs: Tx[], result: (tx: Tx) => Result | undefined, labels: Record<string, string>) {
   const groups = new Map<string, { txs: Tx[]; lines: TemplateResult[]; owners: boolean }>()
   for (const tx of txs) {
@@ -607,19 +613,10 @@ function changeView(txs: Tx[], result: (tx: Tx) => Result | undefined, labels: R
   return [...groups.values()].map(g => {
     const known = g.txs.map(result).filter((r): r is Result => !!r)
     const one = known[0], uniform = !!one && known.every(r => fmt(r.before) === fmt(one.before) && fmt(r.after) === fmt(one.after))
-    const payloads = new Map<string, Tx[]>()
-    for (const tx of g.txs) payloads.set(payloadKey(tx), [...(payloads.get(payloadKey(tx)) ?? []), tx])
     return html`<div class="change">
       <div class="muted small">${groups.size === 1 ? `On all ${plural(g.txs.length, 'Safe')}` : html`On ${plural(g.txs.length, 'Safe')}: ${g.txs.map(t => chainChip(t.chainId))}`}</div>
       <ul>${g.lines.map(l => html`<li>${l}</li>`)}</ul>
       ${g.owners && one ? html`<div class="result">${!uniform ? 'Owner counts differ between Safes' : fmt(one.before) === fmt(one.after) ? `Threshold stays ${fmt(one.after)}` : `${fmt(one.before)} → ${fmt(one.after)}`}</div>` : nothing}
-      <details><summary>Technical details</summary>
-        ${[...payloads.values()].map(list => html`<div class="payload">
-          ${payloads.size > 1 ? html`<div class="muted small">${plural(list.length, 'Safe')}: ${list.map(t => chainChip(t.chainId))}</div>` : nothing}
-          ${steps(describe(list[0]), labels)}
-          ${list[0].operation === 1 ? html`<div class="muted small">Sent through MultiSendCallOnly ${short(list[0].to)} (delegatecall), so the inner calls run as the Safe.</div>` : nothing}
-        </div>`)}
-      </details>
     </div>`
   })
 }
@@ -657,20 +654,11 @@ function reviewView(items: Item[], labels: Record<string, string>) {
   if (new Set(after.map(sig)).size !== 1) return generic()
   const final = after[0], first = known.find(i => !i.done) ?? known[0], before = first.owners!.map(o => o.toLowerCase())
   const removed = before.filter(o => !final.owners.includes(o))
-  const payloads = new Map<string, Tx[]>()
-  for (const { tx } of items) payloads.set(payloadKey(tx), [...(payloads.get(payloadKey(tx)) ?? []), tx])
   return html`<div class="change">
     <div class="muted small">Owners after, on all ${plural(items.length, 'Safe')}</div>
     <div class="chips">${final.owners.map(o => html`<span class=${`owner-chip ${before.includes(o) ? '' : 'new'}`}>${addr(getAddress(o), labels)}${before.includes(o) ? nothing : html` <b class="good">added</b>`}</span>`)}</div>
     ${removed.length ? html`<div class="chips"><span class="muted small">Removed</span>${removed.map(o => html`<span class="owner-chip gone">${addr(getAddress(o), labels)}</span>`)}</div>` : nothing}
     <div class="result">${final.threshold} of ${final.owners.length} signatures needed${first.threshold !== final.threshold || before.length !== final.owners.length ? html` <span class="muted">(was ${first.threshold} of ${before.length})</span>` : nothing}</div>
-    <details><summary>Technical details</summary>
-      ${[...payloads.values()].map(list => html`<div class="payload">
-        ${payloads.size > 1 ? html`<div class="muted small">${plural(list.length, 'Safe')}: ${list.map(t => chainChip(t.chainId))}</div>` : nothing}
-        ${steps(describe(list[0]), labels)}
-        ${list[0].operation === 1 ? html`<div class="muted small">Sent through MultiSendCallOnly ${short(list[0].to)} (delegatecall), so the inner calls run as the Safe.</div>` : nothing}
-      </div>`)}
-    </details>
   </div>`
 }
 
@@ -806,7 +794,9 @@ function reviewStage() {
     <div class="scroll"><table class="list"><tbody>${S.prepared.map(p => {
       const k = prepKind(p), notes = p.notes.filter(x => x !== 'checking the queue…')
       const only = p.tx ? except(ready.indexOf(p)) : ''
-      return html`<tr>
+      const key = keyOf(p), open = !!p.tx && S.open.has(key)
+      const toggle = () => { if (!p.tx) return; open ? S.open.delete(key) : S.open.add(key); update() }
+      return html`<tr class=${p.tx ? 'click' : ''} @click=${toggle}>
         <td class="ico-cell">${k === 'ready' ? html`<span class="ico todo" title="Needs signatures"></span>` : k === 'synced' ? html`<span class="ico idle" title="Already in sync">–</span>` : k === 'attention' ? html`<span class="ico warn" title="Needs attention">!</span>` : html`<span class="ico now"></span>`}</td>
         <td>${chainChip(p.chainId)}</td>
         <td>${addr(p.safe, labels)}</td>
@@ -816,7 +806,9 @@ function reviewStage() {
           ${p.sim && !p.sim.ok && !p.sim.definite ? html`<span class="warn">${p.sim.error}</span>` : nothing}
           ${notes.length ? html`<span class=${notes.some(x => x.startsWith('⚠')) ? 'warn' : 'muted'}>${notes.join('; ')}</span>` : nothing}
         </td>
-      </tr>`
+        <td>${p.tx ? html`<button class="ghost disclose" aria-expanded=${open} aria-label=${`Details for ${chainName(p.chainId)}`} @click=${(e: Event) => { e.stopPropagation(); toggle() }}>${open ? '▾' : '▸'}</button>` : nothing}</td>
+      </tr>
+      ${open ? html`<tr class="details"><td></td><td colspan="4">${actionsView(p.tx!, labels)}</td></tr>` : nothing}`
     })}</tbody></table></div>
     ${S.link ? html`<input readonly class="mono small" aria-label="Signing link" .value=${live(S.link)} @focus=${(e: any) => e.target.select()}>` : nothing}`}
     ${errorList()}
@@ -926,6 +918,7 @@ function batchView() {
         <td><button class="ghost disclose" aria-expanded=${!!r.open} aria-label=${`Details for ${chainName(r.tx.chainId)}`} @click=${(e: Event) => { e.stopPropagation(); toggle() }}>${r.open ? '▾' : '▸'}</button></td>
       </tr>
       ${r.open ? html`<tr class="details"><td></td><td colspan="4">
+        ${actionsView(r.tx, b.labels)}
         <div class="kv">
           <span>nonce</span><span class="mono">${r.tx.nonce}</span>
           <span>to</span><span class="mono wrap">${r.tx.to}</span>
