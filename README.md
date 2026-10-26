@@ -69,15 +69,16 @@ accepted.
 - Every Safe is listed with a mark: ✓ you signed (or proposed) it, ○ it needs you, – nothing for you
   to do, ! a problem, a dashed ring for yours that isn't in the Safe service yet (yellow when the
   upload failed), and a thin spinner while it's still being read. Hover or focus a mark for the
-  details. The one being signed is highlighted, with its safeTxHash, domain hash and message hash to
-  compare against the device.
+  details. Next to it, the signature count (2/5) fills one dash per signature the threshold needs, and
+  is outlined green once proposed, before anyone signs. The one being signed is highlighted, with its
+  safeTxHash, domain hash and message hash to compare against the device.
 - Reading the Safe service is slow (see below), so the page fills in Safe by Safe. Waiting that holds
   you up shows as a spinner on the button it blocks, saying what it's waiting for. Background reading
   is a quiet line that blocks nothing: *Sign N* works while Safes are still loading, and waits for
   each one before asking the wallet.
 - Safes that already have enough signatures are skipped. Pause (and Edit) stop before the next request,
-  keeping the one already open in the wallet. Another transaction queued at the same nonce is flagged on
-  its row.
+  keeping the one already open in the wallet. Another transaction queued at the same nonce shows as
+  ⚠ conflict on its row.
 - When you're done, it says so, unless signatures still need uploading or sharing. In that case it
   says which, and offers the button to fix it.
 

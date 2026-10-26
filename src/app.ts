@@ -485,9 +485,9 @@ function status(r: Row): { kind: Kind; text: string; detail?: string } {
   if (r.execHash) return { kind: 'waiting', text: 'executing…' }
   const n = validSigs(r).length, t = r.threshold!
   if (n >= t) return r.chainNonce === r.tx.nonce ? { kind: 'ready', text: 'ready to execute' } : { kind: 'waiting', text: `signed; nonce ${r.chainNonce} must execute first` }
-  // Short in the row ("2/5"); the tooltip spells it out.
-  const proposed = n === 0 && r.proposed
-  return { kind: 'collecting', text: `${proposed ? 'proposed, ' : ''}${n}/${t}`, detail: `${proposed ? 'Proposed, ' : ''}${n} of ${t} signatures` }
+  // Short in the row's badge ("2/5", sigCount); the tooltip spells it out.
+  const detail = r.proposed && r.trusted === false ? 'Proposed unsigned: Safe{Wallet} lists it once an owner signs' : `${n === 0 && r.proposed ? 'Proposed, ' : ''}${n} of ${t} signatures`
+  return { kind: 'collecting', text: `${n}/${t}`, detail }
 }
 const needsWork = (r: Row) => ['collecting', 'ready', 'waiting'].includes(status(r).kind)
 const loadingRow = (r: Row) => status(r).kind === 'loading' || r.svc === 'loading'
@@ -736,6 +736,10 @@ function copyButton(text: string, label = 'Copy address') {
     <svg class="check-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-6.5"/></svg>
   </button>`
 }
+/** A row's open/close toggle: a chevron that turns down when open. The click doesn't also reach the row's own toggle. */
+const disclose = (open: boolean, label: string, toggle: () => void) => html`<button class="ghost disclose" aria-expanded=${open} aria-label=${label} @click=${(e: Event) => { e.stopPropagation(); toggle() }}>
+  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5l4.5 4.5L6 12.5"/></svg>
+</button>`
 /** An address: short, the full one in its tooltip, with a copy button and its label (an ENS name) if it has one. */
 const addr = (a: string, labels: Record<string, string> = S.batch?.labels ?? {}, cls = 'mono') =>
   html`<span class="addr"><span class=${cls} data-tip=${a}>${short(a)}</span>${copyButton(a)}</span>${labels[a.toLowerCase()] ? html` <span class="label">(${labels[a.toLowerCase()]})</span>` : nothing}`
@@ -1022,7 +1026,7 @@ function reviewStage() {
           ${p.sim && !p.sim.ok && !p.sim.definite ? html`<span class="warn">${p.sim.error}</span>` : nothing}
           ${notes.length ? html`<span class=${notes.some(x => x.startsWith('⚠')) ? 'warn' : 'muted'}>${notes.join('; ')}</span>` : nothing}
         </td>
-        <td>${p.tx ? html`<button class="ghost disclose" aria-expanded=${open} aria-label=${`Details for ${chainName(p.chainId)}`} @click=${(e: Event) => { e.stopPropagation(); toggle() }}>${open ? '▾' : '▸'}</button>` : nothing}</td>
+        <td>${p.tx ? disclose(open, `Details for ${chainName(p.chainId)}`, toggle) : nothing}</td>
       </tr>
       ${queuedAhead(p) ? html`<tr class="sub"><td></td><td colspan="4">${nonceSelect(p)}</td></tr>` : nothing}
       ${open ? html`<tr class="details"><td></td><td colspan="4">
@@ -1065,6 +1069,11 @@ function icon(r: Row, st: ReturnType<typeof status>) {
   return mark('idle', 'Nothing for you to do', '–')
 }
 const KIND_CLASS: Record<Kind, string> = { loading: 'muted', collecting: '', ready: 'good', waiting: 'muted', executed: 'good', blocked: 'bad', unknown: 'warn' }
+/** "2/5" over one dash per signature the threshold needs, filled as they come in; outlined once proposed, before anyone signs. */
+function sigCount(r: Row, st: ReturnType<typeof status>) {
+  const n = validSigs(r).length, t = r.threshold!
+  return html`<span class=${n === 0 && r.proposed ? 'count proposed' : 'count'} style=${`--t: ${t}`} data-tip=${st.detail ?? nothing}>${st.text}<span class="dashes" aria-hidden="true">${Array.from({ length: t }, (_, i) => html`<i class=${i < n ? 'on' : ''}></i>`)}</span></span>`
+}
 
 
 function progressView() {
@@ -1158,14 +1167,14 @@ function batchView() {
         <td>${chainChip(r.tx.chainId)}</td>
         <td>${safeAddr(r.tx.chainId, r.tx.safe, b.labels)}</td>
         <td class="grow-cell">
-          ${reading ? nothing : html`<span class=${KIND_CLASS[st.kind]} data-tip=${r.proposed && r.trusted === false && st.kind === 'collecting' ? 'Proposed unsigned: Safe{Wallet} lists it once an owner signs' : st.kind === 'collecting' ? st.detail : nothing}>${r === S.current && r.phase ? r.phase : st.text}</span>`}
+          ${reading ? nothing : st.kind === 'collecting' && !(r === S.current && r.phase) ? sigCount(r, st) : html`<span class=${KIND_CLASS[st.kind]}>${r === S.current && r.phase ? r.phase : st.text}</span>`}
+          ${conflict ? html`<span class="small warn aside" data-tip=${`Competes with another transaction at nonce ${r.tx.nonce}`}>⚠ conflict</span>` : nothing}
           ${except(S.rows.indexOf(r)) ? html`<div class="small">${except(S.rows.indexOf(r))}</div>` : nothing}
-          ${conflict ? html`<div class="small warn">⚠ competes with another transaction at nonce ${r.tx.nonce}</div>` : nothing}
         </td>
         <td class="row-actions">
           <button class="ghost refresh" aria-label=${`Read ${chainName(r.tx.chainId)} again`} data-tip="Read this Safe again" ?disabled=${reading || S.signing || S.executing || S.waiting}
             @click=${(e: Event) => { e.stopPropagation(); refreshRow(r) }}>↻</button>
-          <button class="ghost disclose" aria-expanded=${!!r.open} aria-label=${`Details for ${chainName(r.tx.chainId)}`} @click=${(e: Event) => { e.stopPropagation(); toggle() }}>${r.open ? '▾' : '▸'}</button>
+          ${disclose(!!r.open, `Details for ${chainName(r.tx.chainId)}`, toggle)}
         </td>
       </tr>
       ${r.open ? html`<tr class="details"><td></td><td colspan="4">
@@ -1300,7 +1309,7 @@ function settingsView() {
       <td>${chainChip(id)}</td>
       <td class="grow-cell">${name}</td>
       <td>${custom(id) ? html`<span class="badge">${c ? 'Custom' : 'Added'}</span>` : nothing}</td>
-      <td><button class="ghost disclose" aria-expanded=${open} aria-label=${`Settings for ${name}`} @click=${(e: Event) => { e.stopPropagation(); toggle() }}>${open ? '▾' : '▸'}</button></td>
+      <td>${disclose(open, `Settings for ${name}`, toggle)}</td>
     </tr>
     ${open ? html`<tr class="details"><td colspan="4">
       ${endpointField('rpc', id)}
