@@ -384,8 +384,9 @@ threshold ${o[2]}`;if(n==="changeThreshold")return`threshold ${o[0]}`}catch{}ret
       ${Kc(g)}
     </div>`:y`<div class="muted">${l?"Nothing left for you to sign":"Not an owner or proposer of these Safes"}</div>`}
   <div class="row small">
-    <span class="grow muted">Executed ${x} of ${p.rows.length}</span>
+    <span class="muted">Executed ${x} of ${p.rows.length}</span>
     ${g&&!A?Dw(g):R}
+    <span class="grow"></span>
     ${p.account&&v&&!w?y`<button @click=${Nw}>Execute ${v}</button>`:R}
     ${p.executing?y`<button @click=${()=>Fn()}>Stop</button>`:R}
     <button class="ghost" aria-label="Refresh" data-tip="Read every Safe again" @click=${Fd} ?disabled=${w}>↻</button>

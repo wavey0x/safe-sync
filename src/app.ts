@@ -1112,8 +1112,9 @@ function progressView() {
     </div>`
   : html`<div class="muted">${involved ? 'Nothing left for you to sign' : 'Not an owner or proposer of these Safes'}</div>`}
   <div class="row small">
-    <span class="grow muted">Executed ${executed} of ${S.rows.length}</span>
+    <span class="muted">Executed ${executed} of ${S.rows.length}</span>
     ${waitText && !blocked ? busyLine(waitText) : nothing}
+    <span class="grow"></span>
     ${S.account && ready && !busy ? html`<button @click=${executeAll}>Execute ${ready}</button>` : nothing}
     ${S.executing ? html`<button @click=${() => stop()}>Stop</button>` : nothing}
     <button class="ghost" aria-label="Refresh" data-tip="Read every Safe again" @click=${refresh} ?disabled=${busy}>↻</button>
