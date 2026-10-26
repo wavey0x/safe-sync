@@ -419,7 +419,7 @@ threshold ${o[2]}`;if(n==="changeThreshold")return`threshold ${o[0]}`}catch{}ret
           <span>to</span><span><span class="mono wrap">${s.tx.to}</span>${Wd(s.tx.to)}</span>
           <span>value</span><span class="mono">${s.tx.value}</span>
           <span>operation</span><span>${s.tx.operation===1?"DELEGATECALL (1)":"CALL (0)"}</span>
-          <span>data</span><span class="mono wrap">${s.tx.data} <a href=${`https://www.anticapture.com/tools/decoder?calldata=${encodeURIComponent(s.tx.data)}`} target="_blank" rel="noopener noreferrer" title="Decode in Anticapture" aria-label="Decode in Anticapture">↗</a></span>
+          <span>data</span><span class="mono wrap">${s.tx.data} <a href=${`https://safe.eth.sh/calldata-decoder?calldata=${encodeURIComponent(s.tx.data)}`} target="_blank" rel="noopener noreferrer" title="Decode in ETH.sh" aria-label="Decode in ETH.sh">↗</a></span>
           <span>gas and refund</span><span class="mono">all zero</span>
           <span>safeTxHash</span><span class="mono wrap">${s.hash}</span>
           <span>domain hash</span><span class="mono wrap">${Pd(s.tx)}</span>
