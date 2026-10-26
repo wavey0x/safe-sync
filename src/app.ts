@@ -5,7 +5,7 @@ import { live } from 'lit-html/directives/live.js'
 import { getAddress, isAddress, toHex, type Address, type Hex } from 'viem'
 import { CHAINS } from './chains'
 import {
-  applyOps, ownerDiff, batchId, chainName, chainOf, client, config, decodeBatch, describe, domainHash, encodeBatch, execData, findSafe, linesFromTx,
+  applyOps, batchId, chainName, chainOf, client, config, decodeBatch, describe, domainHash, encodeBatch, execData, findSafe, linesFromTx,
   linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, prepareTarget, readSafe, resolveNames,
   ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, short, sigOwner, walletTypedData,
   type Action, type Batch, type Found, type OwnerOp, type Prepared, type Step, type Tx,
@@ -25,7 +25,6 @@ type Row = {
   loaded?: Promise<void>; posting?: Promise<void>
 }
 type Wallet = { info: { name: string; icon: string; rdns: string }; provider: any }
-type Result = { before: [number, number]; after: [number, number] }
 /** What the proposer entered. Also stored in the link, so "edit as new batch" can bring it back. */
 /** One owner in the target: `from` is who it started as (none for an added owner), `to` who it becomes (null: removed). */
 type OwnerRow = { from?: string; to: string | null; at?: number } // at: when it was replaced, so replacements keep that order
@@ -601,39 +600,27 @@ const actionsView = (tx: Tx, labels: Record<string, string>) => html`<div class=
 
 const OWNER_FNS = ['swapOwner', 'addOwnerWithThreshold', 'removeOwner', 'changeThreshold']
 
-/** One plain-language line per step. Owner changes ignore encoding details such as prevOwner; calls keep their arguments. */
-function intent(s: Step, labels: Record<string, string>): { key: string; view: TemplateResult } {
+/**
+ * One line per call in the calldata: a verb and what it acts on. Owner calls skip encoding details such as prevOwner
+ * and show the threshold only where they change it; `cur` carries the Safe's threshold through its steps.
+ */
+function intent(s: Step, labels: Record<string, string>, cur: { t?: number }): { key: string; verb: unknown; view: unknown } {
   const a = Object.fromEntries(s.args)
+  const who = (x: string, cls: string) => html`<span class=${cls}>${addr(x, labels)}</span>`
+  const threshold = (n: number) => { const was = cur.t; cur.t = n; return was === n ? '' : was === undefined ? `threshold ${n}` : `threshold ${was} → ${n}` }
+  const note = (t: string) => (t ? html` <span class="muted">· ${t}</span>` : nothing)
   if (s.target === 'self' && s.op === 0) {
-    if (s.fn === 'swapOwner') return { key: `swap ${a.oldOwner} ${a.newOwner}`, view: html`Swap ${addr(a.oldOwner, labels)} → ${addr(a.newOwner, labels)}` }
-    if (s.fn === 'addOwnerWithThreshold') return { key: `add ${a.owner}`, view: html`Add owner ${addr(a.owner, labels)}` }
-    if (s.fn === 'removeOwner') return { key: `remove ${a.owner}`, view: html`Remove owner ${addr(a.owner, labels)}` }
-    if (s.fn === 'changeThreshold') return { key: `threshold ${a._threshold}`, view: html`Set the threshold to ${a._threshold}` }
+    if (s.fn === 'swapOwner') return { key: `swap ${a.oldOwner} ${a.newOwner}`, verb: 'Swap', view: html`${who(a.oldOwner, 'out')} <span class="muted">→</span> ${who(a.newOwner, 'in')}` }
+    if (s.fn === 'addOwnerWithThreshold') { const t = threshold(Number(a._threshold)); return { key: `add ${a.owner} ${t}`, verb: 'Add', view: html`${who(a.owner, 'in')}${note(t)}` } }
+    if (s.fn === 'removeOwner') { const t = threshold(Number(a._threshold)); return { key: `remove ${a.owner} ${t}`, verb: 'Remove', view: html`${who(a.owner, 'out')}${note(t)}` } }
+    if (s.fn === 'changeThreshold') { const t = threshold(Number(a._threshold)) || `threshold ${a._threshold}`; return { key: `set ${t}`, verb: 'Set', view: t } }
   }
   const target = s.target === 'self' ? html`this Safe` : addr(s.target, labels)
   return {
     key: JSON.stringify([s.target, s.fn, s.args, String(s.value), s.op, s.raw]),
-    view: html`${s.op === 1 ? html`<b class="bad">DELEGATECALL </b>` : nothing}Call <span class="fn">${s.fn}</span>${s.args.length ? html`(${s.args.map(([k, v], i) => html`${i ? ', ' : ''}<span class="muted">${k}</span> ${argValue(v, labels)}`)})` : nothing} on ${target}${s.value ? html` with ${s.value.toString()} wei` : nothing}`,
+    verb: s.op === 1 ? html`<b class="bad">Delegatecall</b>` : 'Call',
+    view: html`<span class="fn">${s.fn}</span>${s.args.length ? html`(${s.args.map(([k, v], i) => html`${i ? ', ' : ''}<span class="muted">${k}</span> ${argValue(v, labels)}`)})` : nothing} on ${target}${s.value ? html` with ${s.value.toString()} wei` : nothing}`,
   }
-}
-
-/** The intended change in plain language, grouped across Safes; each row opens to its exact steps. */
-function changeView(txs: Tx[], result: (tx: Tx) => Result | undefined, labels: Record<string, string>) {
-  const groups = new Map<string, { txs: Tx[]; lines: TemplateResult[]; owners: boolean }>()
-  for (const tx of txs) {
-    const list = describe(tx), its = list.map(s => intent(s, labels)), key = its.map(i => i.key).join('\n')
-    const g = groups.get(key) ?? { txs: [], lines: its.map(i => i.view), owners: list.some(s => s.target === 'self' && OWNER_FNS.includes(s.fn)) }
-    g.txs.push(tx); groups.set(key, g)
-  }
-  return [...groups.values()].map(g => {
-    const known = g.txs.map(result).filter((r): r is Result => !!r)
-    const one = known[0], uniform = !!one && known.every(r => fmt(r.before) === fmt(one.before) && fmt(r.after) === fmt(one.after))
-    return html`<div class="change">
-      <div class="muted small">${groups.size === 1 ? `On all ${plural(g.txs.length, 'Safe')}` : html`On ${plural(g.txs.length, 'Safe')}: ${g.txs.map(t => chainChip(t.chainId))}`}</div>
-      <ul>${g.lines.map(l => html`<li>${l}</li>`)}</ul>
-      ${g.owners && one ? html`<div class="result">${!uniform ? 'Owner counts differ between Safes' : fmt(one.before) === fmt(one.after) ? `Threshold stays ${fmt(one.after)}` : `${fmt(one.before)} → ${fmt(one.after)}`}</div>` : nothing}
-    </div>`
-  })
 }
 
 /** "swap 2 owners, threshold 5 → 4": what one Safe's transaction does. */
@@ -648,39 +635,37 @@ const mostCommon = (xs: string[]) => [...xs.reduce((m, x) => m.set(x, (m.get(x) 
 
 // done: already executed, so the owners read are already the result. failed: its state couldn't be read.
 type Item = { tx: Tx; owners?: Address[]; threshold?: number; done?: boolean; failed?: boolean }
+const changesOwners = (tx: Tx) => describe(tx).some(s => s.target === 'self' && OWNER_FNS.includes(s.fn))
+
 /**
- * For owner changes, the review leads with the configuration every Safe ends up with; what differs per Safe goes on its row.
- * Anything else falls back to the step-by-step summary.
+ * What the calldata does, one line per call, grouped by the Safes whose calls match; each row below opens to its exact
+ * steps. Owner changes wait until every Safe is read, since which thresholds change depends on each Safe.
  */
 function reviewView(items: Item[], labels: Record<string, string>) {
-  const ops = items.map(i => ownerOps(i.tx))
-  const generic = () => changeView(items.map(i => i.tx), tx => {
-    const i = items.find(x => x.tx === tx)!, o = ownerOps(tx)
-    if (!i.owners || i.threshold === undefined || i.done || !o) return undefined
-    const a = applyOps(i.owners, i.threshold, o)
-    return { before: [i.threshold, i.owners.length], after: [a.threshold, a.owners.length] }
-  }, labels)
-  if (ops.some(o => !o) || items.some(i => i.failed)) return generic()
-  // "On all Safes" is only claimed once every Safe's current owners are known.
-  if (items.some(i => !i.owners || i.threshold === undefined)) return html`<div class="change"><div class="muted small">Reading every Safe…</div></div>`
-  const after = items.map((i, k) => (i.done ? { owners: i.owners!.map(o => o.toLowerCase()), threshold: i.threshold! } : applyOps(i.owners!, i.threshold!, ops[k]!)))
-  const sig = (a: { owners: string[]; threshold: number }) => `${[...a.owners].sort().join()}|${a.threshold}`
-  if (new Set(after.map(sig)).size !== 1) return generic()
-  // Described from the change most Safes make; a Safe that differs says so on its row.
-  const final = after[0], texts = items.map((i, k) => (i.done ? '' : changeText(ops[k]!, i.threshold)))
-  const first = items[texts.indexOf(mostCommon(texts.filter(Boolean)) ?? '')] ?? items[0], before = first.owners!.map(o => o.toLowerCase())
-  const d = ownerDiff(before, final.owners, first.done ? [] : ops[items.indexOf(first)]!)
-  const chip = (o: string, cls = '', badge: unknown = nothing) => html`<span class=${`owner-chip ${cls}`}>${addr(getAddress(o), labels)}${badge}</span>`
-  return html`<div class="change">
-    <div class="muted small">On all ${plural(items.length, 'Safe')}</div>
-    ${d.swaps.length + d.added.length + d.removed.length ? html`<div class="owner-changes">
-      ${d.swaps.map(([o, n]) => html`<div class="chips">${chip(o, 'out')}<span class="muted">→</span>${chip(n, 'in')}</div>`)}
-      ${d.added.map(o => html`<div class="chips">${chip(o, 'in', html` <b class="good">added</b>`)}</div>`)}
-      ${d.removed.map(o => html`<div class="chips">${chip(o, 'out', html` <b class="bad">removed</b>`)}</div>`)}
-    </div>` : nothing}
-    ${d.kept.length ? html`<div class="chips"><span class="muted small">Unchanged</span>${d.kept.map(o => chip(o))}</div>` : nothing}
-    <div class="result">${final.threshold} of ${final.owners.length} signatures needed${first.threshold !== final.threshold || before.length !== final.owners.length ? html` <span class="muted">(was ${first.threshold} of ${before.length})</span>` : nothing}</div>
-  </div>`
+  if (items.some(i => changesOwners(i.tx) && !i.failed && (!i.owners || i.threshold === undefined))) return html`<div class="change"><div class="muted small">Reading every Safe…</div></div>`
+  const groups = new Map<string, { items: Item[]; lines: { verb: unknown; view: unknown }[] }>()
+  for (const i of items) {
+    // An executed Safe's threshold is already the result, so its calls show the threshold they set.
+    const cur = { t: i.done ? undefined : i.threshold }, lines = describe(i.tx).map(s => intent(s, labels, cur)), key = lines.map(l => l.key).join('\n')
+    const g = groups.get(key) ?? { items: [], lines }
+    g.items.push(i); groups.set(key, g)
+  }
+  return [...groups.values()].map(g => {
+    const kept = unchanged(g.items)
+    return html`<div class="change">
+      ${groups.size > 1 ? html`<div class="muted small">On ${plural(g.items.length, 'Safe')}: ${g.items.map(i => chainChip(i.tx.chainId))}</div>` : nothing}
+      <div class="acts">${g.lines.map(l => html`<span class="verb">${l.verb}</span><span>${l.view}</span>`)}</div>
+      ${kept.length ? html`<details><summary>${plural(kept.length, 'unchanged owner')}</summary><div class="kept">${kept.map(o => html`<span>${addr(getAddress(o), labels)}</span>`)}</div></details>` : nothing}
+    </div>`
+  })
+}
+
+/** The owners an owner change leaves in place, when every Safe in the group starts from the same list. */
+function unchanged(items: Item[]): string[] {
+  const ops = items.map(i => ownerOps(i.tx)), key = (o: string[]) => o.map(x => x.toLowerCase()).sort().join()
+  if (ops.some(o => !o) || items.some(i => i.done || !i.owners || i.threshold === undefined) || new Set(items.map(i => key(i.owners!))).size !== 1) return []
+  const before = items[0].owners!.map(o => o.toLowerCase())
+  return applyOps(before, items[0].threshold!, ops[0]!).owners.filter(o => before.includes(o))
 }
 
 /** Per-Safe exceptions: a row only says what it changes when that differs from what most Safes change. */

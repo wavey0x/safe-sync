@@ -27,11 +27,11 @@ browser's Back and Forward move between them, and a reload stays on the step you
      changes in it are redone per Safe, and the source Safe's own address becomes each Safe's.
      DELEGATECALLs are refused, and every call target must exist on each chain.
 3. **Review N Safes** checks the change first. Then each Safe is built, simulated from its own
-   context, and hash-checked against the Safe contract. For owner changes the review shows what every
-   Safe ends up with, read back from the calldata: each swap as out → in, adds in green, removes in
-   red, the unchanged owners, and the signatures needed. A Safe that needs something different says so
-   on its row. Results come back as ready, already in sync, or needs attention, and each row opens to
-   its exact steps.
+   context, and hash-checked against the Safe contract. The review lists what the calldata does, one
+   line per call: *Swap* out → in, *Add* in green, *Remove* in red, and the threshold only where a call
+   changes it. Unchanged owners sit behind a toggle. Safes whose calls differ get their own group.
+   Results come back as ready, already in sync, or needs attention, and each Safe's row opens to its
+   exact steps.
 4. **Copy signing link** creates the link and copies it ("Copied ✓"); *Sign now* opens it. Going back
    without changing anything keeps the results; any edit throws them away, so a link never carries
    stale transactions. *Edit* on a signing link reopens its change at step 2.

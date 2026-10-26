@@ -587,23 +587,6 @@ export function applyOps(owners: string[], threshold: number, ops: OwnerOp[]) {
   return { owners: o, threshold: t }
 }
 
-/**
- * The net change from one owner list to another, for display: an owner swapped out is paired with the one
- * that took its place (following chains like A→B→C), and whatever is left is a plain add or remove. Lowercase.
- */
-export function ownerDiff(before: string[], after: string[], ops: OwnerOp[]) {
-  const [b, a] = [before, after].map(l => l.map(x => x.toLowerCase()))
-  const next = new Map(ops.flatMap(o => (o.kind === 'swap' ? [[o.old.toLowerCase(), o.new.toLowerCase()] as const] : [])))
-  const swaps: [string, string][] = []
-  for (const out of b.filter(o => !a.includes(o))) {
-    let to = out
-    for (let hops = 0; next.has(to) && hops < next.size; hops++) to = next.get(to)!
-    if (to !== out && a.includes(to) && !b.includes(to)) swaps.push([out, to])
-  }
-  const swapped = new Set(swaps.flat())
-  return { swaps, added: a.filter(o => !b.includes(o) && !swapped.has(o)), removed: b.filter(o => !a.includes(o) && !swapped.has(o)), kept: a.filter(o => b.includes(o)) }
-}
-
 /** Grouping key: identical payloads up to the Safe's own address. */
 export const payloadKey = (tx: Tx) => JSON.stringify([same(tx.to, tx.safe) ? 'self' : tx.to.toLowerCase(), tx.value, withSelf(tx.data, tx.safe).toLowerCase(), tx.operation])
 
