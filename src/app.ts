@@ -485,7 +485,9 @@ function status(r: Row): { kind: Kind; text: string; detail?: string } {
   if (r.execHash) return { kind: 'waiting', text: 'executing…' }
   const n = validSigs(r).length, t = r.threshold!
   if (n >= t) return r.chainNonce === r.tx.nonce ? { kind: 'ready', text: 'ready to execute' } : { kind: 'waiting', text: `signed; nonce ${r.chainNonce} must execute first` }
-  return { kind: 'collecting', text: `${n === 0 && r.proposed ? 'proposed, ' : ''}${n} of ${t} signatures` }
+  // Short in the row ("2/5"); the tooltip spells it out.
+  const proposed = n === 0 && r.proposed
+  return { kind: 'collecting', text: `${proposed ? 'proposed, ' : ''}${n}/${t}`, detail: `${proposed ? 'Proposed, ' : ''}${n} of ${t} signatures` }
 }
 const needsWork = (r: Row) => ['collecting', 'ready', 'waiting'].includes(status(r).kind)
 const loadingRow = (r: Row) => status(r).kind === 'loading' || r.svc === 'loading'
@@ -685,10 +687,13 @@ async function importSigs() {
   update()
 }
 
+/** Reads one Safe again: its chain state and one Safe service request, instead of one per Safe in the link. */
+function refreshRow(r: Row) {
+  r.error = r.uploadError = undefined; r.svc = 'loading'; r.loaded = loadRow(r); update()
+}
 function refresh() {
   S.delegations = {}
-  for (const r of S.rows) { r.error = r.uploadError = undefined; r.svc = 'loading'; r.loaded = loadRow(r) }
-  update()
+  S.rows.forEach(refreshRow)
 }
 
 function edit() {
@@ -1144,18 +1149,24 @@ function batchView() {
     <div class="scroll"><table class="list"><tbody>${S.rows.map(r => {
       const st = status(r)
       const link = safeLink(r.tx, r.proposed ? r.hash : undefined)
-      const conflict = r.others.some(o => !o.isExecuted) && needsWork(r)
+      // While a Safe is being read, its count and conflicts may be about to change, so they wait (its mark spins).
+      const reading = loadingRow(r) && r !== S.current
+      const conflict = !reading && r.others.some(o => !o.isExecuted) && needsWork(r)
       const toggle = () => { r.open = !r.open; update() }
       return html`<tr class=${`click ${r === S.current ? 'active' : ''}`} @click=${toggle}>
         <td class="ico-cell">${icon(r, st)}</td>
         <td>${chainChip(r.tx.chainId)}</td>
         <td>${safeAddr(r.tx.chainId, r.tx.safe, b.labels)}</td>
         <td class="grow-cell">
-          <span class=${KIND_CLASS[st.kind]} data-tip=${r.proposed && r.trusted === false && st.kind === 'collecting' ? 'Proposed unsigned: Safe{Wallet} lists it once an owner signs' : nothing}>${r === S.current && r.phase ? r.phase : st.text}</span>
+          ${reading ? nothing : html`<span class=${KIND_CLASS[st.kind]} data-tip=${r.proposed && r.trusted === false && st.kind === 'collecting' ? 'Proposed unsigned: Safe{Wallet} lists it once an owner signs' : st.kind === 'collecting' ? st.detail : nothing}>${r === S.current && r.phase ? r.phase : st.text}</span>`}
           ${except(S.rows.indexOf(r)) ? html`<div class="small">${except(S.rows.indexOf(r))}</div>` : nothing}
           ${conflict ? html`<div class="small warn">⚠ competes with another transaction at nonce ${r.tx.nonce}</div>` : nothing}
         </td>
-        <td><button class="ghost disclose" aria-expanded=${!!r.open} aria-label=${`Details for ${chainName(r.tx.chainId)}`} @click=${(e: Event) => { e.stopPropagation(); toggle() }}>${r.open ? '▾' : '▸'}</button></td>
+        <td class="row-actions">
+          <button class="ghost refresh" aria-label=${`Read ${chainName(r.tx.chainId)} again`} data-tip="Read this Safe again" ?disabled=${reading || S.signing || S.executing || S.waiting}
+            @click=${(e: Event) => { e.stopPropagation(); refreshRow(r) }}>↻</button>
+          <button class="ghost disclose" aria-expanded=${!!r.open} aria-label=${`Details for ${chainName(r.tx.chainId)}`} @click=${(e: Event) => { e.stopPropagation(); toggle() }}>${r.open ? '▾' : '▸'}</button>
+        </td>
       </tr>
       ${r.open ? html`<tr class="details"><td></td><td colspan="4">
         ${actionsView(r.tx, b.labels)}

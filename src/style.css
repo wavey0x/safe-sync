@@ -115,6 +115,12 @@ tr.has-sub td { border-bottom: 0; } tr.sub td { padding-top: 0; }
 .retry { padding: 0 6px; }
 pre { margin: 6px 0 0; white-space: pre-wrap; }
 .disclose { padding: 2px 8px; }
+/* A row's own refresh: shown on hover or focus (always on touch screens), gone while it can't be used */
+.row-actions { white-space: nowrap; text-align: right; }
+.refresh { padding: 2px 6px; opacity: 0; } .refresh:hover:not(:disabled) { color: var(--fg); }
+tr:hover .refresh, .refresh:focus-visible { opacity: 1; }
+.refresh:disabled { visibility: hidden; }
+@media (hover: none) { .refresh { opacity: 1; } }
 
 /* Progress */
 .bar { height: 6px; background: var(--chip); border-radius: 3px; overflow: hidden; }
