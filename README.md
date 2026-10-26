@@ -19,7 +19,7 @@ browser's Back and Forward move between them, and a reload stays on the step you
 2. **Change**, one of two kinds:
    - **Owners:** the owners of the Safe most chains share are copied in once ("Starting from …"),
      then you edit them: *Swap* or *Remove* any, *+ Add owner* (address or name.eth), and set
-     *Signatures needed*. That target is saved as it is and never recomputed from the chains, so Edit
+     the *Threshold*. That target is saved as it is and never recomputed from the chains, so Edit
      after a partial execution doesn't double count. Each Safe is compared with the target on its own:
      one that already matches is skipped, and one that drifted is brought in line. Chips whose owners
      differ from the starting list are marked amber. Chains you leave out stay left out after Edit.

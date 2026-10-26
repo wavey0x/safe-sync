@@ -740,7 +740,9 @@ function ownersEditor() {
     <div class="row">
       <button class="ghost" @click=${() => { S.d.owners.push({ to: '' }); changed() }}>+ Add owner</button>
       <span class="grow"></span>
-      <label class="check">Signatures needed <input class="num" type="number" min="1" max=${t.owners.length} .value=${live(String(t.threshold))} @input=${(e: any) => { S.d.threshold = Number(e.target.value) || null; changed() }}> of ${t.owners.length}</label>
+      <label class="check">Threshold <span class="select"><select @change=${(e: any) => { S.d.threshold = Number(e.target.value); changed() }}>
+        ${Array.from({ length: Math.max(t.owners.length, t.threshold) }, (_, i) => html`<option .selected=${i + 1 === t.threshold} value=${i + 1}>${i + 1}</option>`)}
+      </select></span> of ${t.owners.length}</label>
     </div>`
 }
 

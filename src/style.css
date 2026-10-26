@@ -95,7 +95,10 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .segs { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; padding: 2px; gap: 2px; }
 .seg { border: 0; background: transparent; color: var(--muted); padding: 6px 12px; }
 .seg.on { background: var(--active); color: var(--fg); }
-input.num { width: 64px; padding: 5px 8px; text-align: center; }
+.select { position: relative; display: inline-flex; }
+.select select { appearance: none; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 7px; padding: 5px 30px 5px 12px; font: inherit; font-weight: 600; cursor: pointer; }
+.select select:hover { border-color: var(--accent); } .select select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.select::after { content: ''; position: absolute; right: 12px; top: calc(50% - 5px); width: 6px; height: 6px; border: solid var(--muted); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); pointer-events: none; }
 pre { margin: 6px 0 0; white-space: pre-wrap; }
 .disclose { padding: 2px 8px; }
 
