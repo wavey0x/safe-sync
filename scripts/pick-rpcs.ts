@@ -35,10 +35,10 @@ for (const id of [...Object.keys(SERVICE).map(Number), ...EXTRA]) {
   if (!r) { console.error('missing', id); continue }
   const urls = r.rpc.filter(x => x.url.startsWith('https://') && !/[${}]|api[_-]?key/i.test(x.url)).sort((a, b) => rank(a.tracking, a.url) - rank(b.tracking, b.url)).slice(0, 10)
   const timed = await Promise.all(urls.map(async x => ({ url: x.url, rank: rank(x.tracking, x.url), ...(await probe(x.url, id).catch(() => ({ ms: Infinity, revert: false }))) })))
-  // Prefer endpoints that return revert data, then privacy-friendly ones unless they are much slower.
+  // Prefer endpoints that return revert data, then privacy-friendly ones, with latency breaking ties.
   const ok = timed.filter(x => x.ms < Infinity), withRevert = ok.filter(x => x.revert)
   const best = (withRevert.length ? withRevert : ok).sort((a, b) => a.rank - b.rank || a.ms - b.ms)
-  const pick = best.find(x => x.ms < (best[0]?.ms ?? 0) * 3 + 400) ?? best[0]
+  const pick = best[0]
   if (!pick) { console.error('no rpc', id, r.name); continue }
   // A second endpoint from a different provider, used when the first fails.
   const host = (u: string) => new URL(u).hostname.split('.').slice(-2).join('.')
