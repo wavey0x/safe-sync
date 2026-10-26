@@ -590,7 +590,7 @@ const OWNER_FNS = ['swapOwner', 'addOwnerWithThreshold', 'removeOwner', 'changeT
 function intent(s: Step, labels: Record<string, string>): { key: string; view: TemplateResult } {
   const a = Object.fromEntries(s.args)
   if (s.target === 'self' && s.op === 0) {
-    if (s.fn === 'swapOwner') return { key: `swap ${a.oldOwner} ${a.newOwner}`, view: html`Replace ${addr(a.oldOwner, labels)} → ${addr(a.newOwner, labels)}` }
+    if (s.fn === 'swapOwner') return { key: `swap ${a.oldOwner} ${a.newOwner}`, view: html`Swap ${addr(a.oldOwner, labels)} → ${addr(a.newOwner, labels)}` }
     if (s.fn === 'addOwnerWithThreshold') return { key: `add ${a.owner}`, view: html`Add owner ${addr(a.owner, labels)}` }
     if (s.fn === 'removeOwner') return { key: `remove ${a.owner}`, view: html`Remove owner ${addr(a.owner, labels)}` }
     if (s.fn === 'changeThreshold') return { key: `threshold ${a._threshold}`, view: html`Set the threshold to ${a._threshold}` }
@@ -621,10 +621,10 @@ function changeView(txs: Tx[], result: (tx: Tx) => Result | undefined, labels: R
   })
 }
 
-/** "replace 2 owners, threshold 5 → 4": what one Safe's transaction does. */
+/** "swap 2 owners, threshold 5 → 4": what one Safe's transaction does. */
 function changeText(ops: OwnerOp[], before?: number) {
   const n = (k: OwnerOp['kind']) => ops.filter(op => op.kind === k).length
-  const parts = [n('swap') && `replace ${plural(n('swap'), 'owner')}`, n('add') && `add ${plural(n('add'), 'owner')}`, n('remove') && `remove ${plural(n('remove'), 'owner')}`].filter(Boolean) as string[]
+  const parts = [n('swap') && `swap ${plural(n('swap'), 'owner')}`, n('add') && `add ${plural(n('add'), 'owner')}`, n('remove') && `remove ${plural(n('remove'), 'owner')}`].filter(Boolean) as string[]
   const after = before === undefined ? undefined : applyOps([], before, ops).threshold
   if (after !== undefined && after !== before) parts.push(`threshold ${before} → ${after}`)
   return parts.join(', ')
@@ -677,7 +677,7 @@ function exceptions(items: Item[]) {
 
 // ---------------------------------------------------------------- compose view
 
-/** "Replace 2 owners on 15 Safes": the batch's title, from what every Safe's transaction does. */
+/** "Swap 2 owners on 15 Safes": the batch's title, from what every Safe's transaction does. */
 function titleFor(items: Item[]): string {
   const changes = items.map(i => ownerOps(i.tx))
   if (changes.every(Boolean)) {
@@ -688,7 +688,7 @@ function titleFor(items: Item[]): string {
   const txs = items.map(i => i.tx)
   const steps = describe(txs[0]), count = (fn: string) => steps.filter(st => st.target === 'self' && st.fn === fn).length
   const parts = [
-    count('swapOwner') && `replace ${plural(count('swapOwner'), 'owner')}`, count('addOwnerWithThreshold') && `add ${plural(count('addOwnerWithThreshold'), 'owner')}`,
+    count('swapOwner') && `swap ${plural(count('swapOwner'), 'owner')}`, count('addOwnerWithThreshold') && `add ${plural(count('addOwnerWithThreshold'), 'owner')}`,
     count('removeOwner') && `remove ${plural(count('removeOwner'), 'owner')}`, count('changeThreshold') && 'change the threshold',
   ].filter(Boolean) as string[]
   const calls = steps.filter(st => !(st.target === 'self' && OWNER_FNS.includes(st.fn)))
@@ -729,9 +729,9 @@ function ownersEditor() {
     ${start ? html`<div class="muted small">Starting from ${chainChip(start.chainId)} ${addr(start.safe)}</div>` : nothing}
     <div class="owners">${S.d.owners.map((r, i) => r.from ? html`<div class="owner">
         <span class=${r.to === null ? 'mono gone' : 'mono'} title=${r.from}>${short(r.from)}</span>
-        ${r.to === r.from ? html`<span></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: '', at: Date.now() })}>Replace</button><button class="ghost" @click=${() => set(i, { to: null })}>Remove</button></span>`
+        ${r.to === r.from ? html`<span></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: '', at: Date.now() })}>Swap</button><button class="ghost" @click=${() => set(i, { to: null })}>Remove</button></span>`
         : r.to === null ? html`<span></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: r.from, at: undefined })}>Undo</button></span>`
-        : html`<span class="swap"><span class="muted">→</span><input class="mono" placeholder="Replacement (0x… or name.eth)" .value=${live(r.to)} @input=${(ev: any) => { r.to = ev.target.value; changed() }}></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: r.from, at: undefined })}>Undo</button></span>`}
+        : html`<span class="swap"><span class="muted">→</span><input class="mono" placeholder="New owner (0x… or name.eth)" .value=${live(r.to)} @input=${(ev: any) => { r.to = ev.target.value; changed() }}></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: r.from, at: undefined })}>Undo</button></span>`}
       </div>` : html`<div class="owner">
         <span class="swap add"><span class="good" aria-hidden="true">+</span><input class="mono" placeholder="Address to add (0x… or name.eth)" aria-label="Owner to add" .value=${live(r.to ?? '')} @input=${(ev: any) => { r.to = ev.target.value; changed() }}></span>
         <span class="actions"><button class="ghost" aria-label="Don't add" @click=${() => { S.d.owners.splice(i, 1); changed() }}>✕</button></span>
