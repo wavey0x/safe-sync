@@ -8,7 +8,7 @@ import {
 } from '../src/safe'
 import * as svc from '../src/service'
 import { startMockService } from './mock-service'
-import { ACCOUNTS, CHAIN_IDS, INCOMING, OWNERS, startSandbox, type Sandbox } from './sandbox'
+import { ACCOUNTS, CHAIN_IDS, INCOMING, OWNERS, PROPOSER, startSandbox, type Sandbox } from './sandbox'
 
 const enabled = !!Bun.which('anvil')
 let sb: Sandbox
@@ -68,11 +68,9 @@ test.skipIf(!enabled)('prepare sorts the 16 Safes into ready and already applied
 
 test.skipIf(!enabled)('five owners sign everything through the service, then one executor runs it on every chain', async () => {
   const ready = (await prepareAll()).filter(p => p.tx && !p.error && !p.skip)
-  const offline = new Map<string, { owner: Address; sig: Hex }[]>()
   for (const owner of OWNERS.slice(0, 5)) {
     for (const p of ready) {
       const tx = p.tx!, hash = p.hash!
-      if (sb.noServiceChains.includes(tx.chainId)) { offline.set(hash, [...(offline.get(hash) ?? []), { owner: owner.address, sig: await sign(tx, owner) }]); continue }
       const existing = await svc.getTx(tx.chainId, hash)
       if (existing?.confirmations.some(c => c.owner === owner.address)) continue
       if (existing && existing.confirmations.length >= 5) continue
@@ -82,12 +80,9 @@ test.skipIf(!enabled)('five owners sign everything through the service, then one
   const executor = ACCOUNTS[0]
   for (const p of ready) {
     const tx = p.tx!, hash = p.hash!
-    let sigs = offline.get(hash)
-    if (!sigs) {
-      const s = (await svc.getTx(tx.chainId, hash))!
-      expect(s.confirmations.length).toBeGreaterThanOrEqual(5)
-      sigs = s.confirmations.map(c => ({ owner: c.owner, sig: c.signature }))
-    }
+    const s = (await svc.getTx(tx.chainId, hash))!
+    expect(s.confirmations.length).toBeGreaterThanOrEqual(5)
+    const sigs = s.confirmations.map(c => ({ owner: c.owner, sig: c.signature }))
     for (const s of sigs) expect(await sigOwner(hash, s.sig)).toBe(s.owner)
     const w = createWalletClient({ account: executor, transport: http(config.rpc[tx.chainId]) }).extend(publicActions)
     const rc = await w.waitForTransactionReceipt({ hash: await w.sendTransaction({ to: tx.safe, data: execData(tx, sigs, 5), chain: null }) })
@@ -96,7 +91,7 @@ test.skipIf(!enabled)('five owners sign everything through the service, then one
     expect(after.owners).toContain(INCOMING[1].address)
     expect(after.owners).not.toContain(OWNERS[0].address)
     expect(after.nonce).toBe(tx.nonce + 1)
-    if (!sb.noServiceChains.includes(tx.chainId)) expect((await svc.getTx(tx.chainId, hash))!.isExecuted).toBe(true)
+    expect((await svc.getTx(tx.chainId, hash))!.isExecuted).toBe(true)
   }
   expect(new Set(ready.map(p => p.chainId)).size).toBe(CHAIN_IDS.length - 1) // every chain except Linea, already done
 }, 180_000)
@@ -144,6 +139,63 @@ test.skipIf(!enabled)('Safe service rules the client depends on', async () => {
     svc.config.service[8453] = slow.url(8453)
     expect(await Promise.all(Array.from({ length: 6 }, () => svc.getTx(8453, safeTxHash(tx))))).toEqual(Array(6).fill(null))
   } finally { svc.config.service[8453] = sb.service.url(8453); slow.stop() }
+}, 60_000)
+
+test.skipIf(!enabled)('a proposer (delegate) proposes in its delegator\'s name, and its signature is no confirmation', async () => {
+  const tx: Tx = { chainId: 8453, safe: sb.team, nonce: 1000, to: sb.team, value: '0', data: encodeFunctionData({ abi: parseAbi(['function changeThreshold(uint256)']), functionName: 'changeThreshold', args: [3n] }), operation: 0 }
+  const hash = safeTxHash(tx), path = `/v2/safes/${tx.safe}/multisig-transactions/`
+  // The sandbox has owner 2 name the proposer for all of its Safes.
+  expect((await svc.delegations(8453, PROPOSER.address)).map(d => [d.safe, d.delegator, d.expiryDate])).toEqual([[null, OWNERS[1].address, null]])
+  expect(await svc.delegations(8453, ACCOUNTS[0].address)).toEqual([])
+  // A delegate sends its own signature and nothing else.
+  const both = `${await sign(tx, OWNERS[5])}${(await sign(tx, PROPOSER)).slice(2)}` as Hex
+  const res = await post(8453, path, await proposal(tx, PROPOSER.address, both))
+  expect([res.status, await res.text()]).toEqual([422, JSON.stringify({ nonFieldErrors: ['Just one signature is expected if using delegates'] })])
+
+  await svc.propose(tx, hash, PROPOSER.address, await sign(tx, PROPOSER), OWNERS[0].address)
+  const t = (await svc.getTx(8453, hash))!
+  expect([t.proposedByDelegate, t.confirmations]).toEqual([PROPOSER.address, []])
+  // Signed, so trusted: Safe{Wallet}'s queue (and ours) lists it.
+  expect((await svc.atNonce(8453, sb.team, 1000)).map(x => x.safeTxHash)).toEqual([hash])
+  // Owners confirm as usual; the proposer can't.
+  await svc.submit(tx, hash, OWNERS[5].address, await sign(tx, OWNERS[5]), true)
+  expect((await svc.getTx(8453, hash))!.confirmations.map(c => c.owner)).toEqual([OWNERS[5].address])
+  expect((await post(8453, `/v1/multisig-transactions/${hash}/confirmations/`, { signature: await sign(tx, PROPOSER) })).status).toBe(400)
+
+  // Named for another Safe, expired, or by someone who isn't an owner: no proposing.
+  const other = { ...tx, nonce: 1001 }, outsider = ACCOUNTS[0].address
+  const rows = [
+    { chainId: 8453, safe: sb.original!, delegate: outsider, delegator: OWNERS[1].address, label: '', expiryDate: null },
+    { chainId: 8453, safe: null, delegate: outsider, delegator: OWNERS[1].address, label: '', expiryDate: new Date(Date.now() - 60_000).toISOString() },
+    { chainId: 8453, safe: null, delegate: outsider, delegator: PROPOSER.address, label: '', expiryDate: null },
+  ]
+  sb.service.delegates.push(...rows)
+  try {
+    const r = await post(8453, path, await proposal(other, outsider, await sign(other, ACCOUNTS[0])))
+    expect([r.status, await r.text()]).toEqual([422, expect.stringContaining(`Sender=${outsider} is not an owner or delegate`)])
+    expect(await svc.delegations(8453, outsider)).toHaveLength(3) // listed all the same: the client checks
+  } finally { sb.service.delegates.splice(-rows.length) }
+}, 60_000)
+
+test.skipIf(!enabled)('anyone else proposes unsigned, naming an owner: untrusted until an owner confirms', async () => {
+  const tx: Tx = { chainId: 252, safe: sb.team, nonce: 1000, to: sb.team, value: '0', data: encodeFunctionData({ abi: parseAbi(['function changeThreshold(uint256)']), functionName: 'changeThreshold', args: [3n] }), operation: 0 }
+  const hash = safeTxHash(tx), outsider = ACCOUNTS[0].address
+  // The service still takes a proposal without a signature, but only from an owner (or delegate) as sender.
+  const res = await post(252, `/v2/safes/${tx.safe}/multisig-transactions/`, await proposal(tx, outsider, null))
+  expect([res.status, await res.text()]).toEqual([422, expect.stringContaining(`Sender=${outsider} is not an owner or delegate`)])
+
+  await svc.propose(tx, hash, outsider, null, OWNERS[1].address)
+  const t = (await svc.getTx(252, hash))!
+  expect([t.trusted, t.confirmations, t.proposedByDelegate]).toEqual([false, [], null])
+  expect(JSON.parse((t as any).origin)).toEqual({ name: 'Safe Sync', note: `unsigned, sent by ${outsider}` })
+  // Out of the default (trusted) listing, which is what Safe{Wallet}'s queue shows; ours asks for untrusted too.
+  expect(await svc.queued(252, sb.team, 1000)).toEqual([])
+  expect((await svc.atNonce(252, sb.team, 1000)).map(x => [x.safeTxHash, x.trusted])).toEqual([[hash, false]])
+  // The first owner's signature confirms it and makes it trusted.
+  await svc.submit(tx, hash, OWNERS[5].address, await sign(tx, OWNERS[5]), true)
+  const after = (await svc.getTx(252, hash))!
+  expect([after.trusted, after.confirmations.map(c => c.owner)]).toEqual([true, [OWNERS[5].address]])
+  expect((await svc.queued(252, sb.team, 1000)).map(x => x.safeTxHash)).toEqual([hash])
 }, 60_000)
 
 test.skipIf(!enabled)('simple mode: the two well-known test wallets run a 2-of-2 Safe on three local chains', async () => {

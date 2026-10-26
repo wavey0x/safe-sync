@@ -20,8 +20,11 @@ type Row = {
   tx: Tx; hash: Hex; sigs: Record<string, Sig>
   owners?: Address[]; threshold?: number; chainNonce?: number
   svc: 'loading' | 'ok' | 'none' | 'error'; proposed: boolean; svcExecuted?: boolean; readAt: number
+  trusted?: boolean // false: proposed unsigned, so out of Safe{Wallet}'s queue until an owner signs
+  proposer?: Address; proposing?: boolean // proposer: who proposed it when not an owner (a delegate, or someone unsigned from here)
   others: { safeTxHash: Hex; isExecuted: boolean }[] // other transactions at the same nonce
   phase?: string; error?: string; fatal?: string; execHash?: Hex; execOk?: boolean; open?: boolean
+  uploadError?: string // a signature or proposal made here that didn't reach the service
   loaded?: Promise<void>; posting?: Promise<void>
 }
 type Wallet = { info: { name: string; icon: string; rdns: string }; provider: any }
@@ -57,10 +60,11 @@ const keyOf = (f: { chainId: number; safe: string }) => `${f.chainId}:${f.safe}`
 const S = {
   mode: 'compose' as 'compose' | 'batch', stage: 1 as Stage,
   d: asDraft(store.get<Partial<Draft>>('safesync:draft', {})),
-  found: [] as Pick[], looking: new Set<string>(), lines: '', sourceNote: '',
+  found: [] as Pick[], looking: new Set<string>(), lines: '', sourceNote: '', loadingSource: false,
   preparing: false, prepared: [] as Prepared[], errors: [] as string[], names: {} as Record<string, Address>, link: '',
   batch: null as Batch | null, id: '', rows: [] as Row[], loadError: '', pasted: '',
   wallets: [] as Wallet[], provider: null as any, account: null as Address | null, choosing: false,
+  delegations: {} as Record<string, svc.Delegation[]>, lookingUp: 0, // keyed "account:chainId"
   signing: false, executing: false, waiting: false, current: null as Row | null, open: new Set<string>(), copiedSafe: null as { key: string; ok: boolean } | null, notice: '', copied: '' as '' | 'yes' | 'failed',
   settingsOpen: false, settingsErrors: [] as string[], settings: store.get('safesync:settings', { rpc: '', service: '', apiKey: '' }),
 }
@@ -74,8 +78,31 @@ const update = () => {
     render(view(), document.body)
     // Keep the transaction being worked on in view, so the list reads as a checklist.
     if (S.signing || S.executing) document.querySelector('tr.active')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    if (tipFor) showTip(tipFor)
   })
 }
+
+// One tooltip for every [data-tip]: shown at once on hover or keyboard focus, fixed to the viewport so a scrolling
+// table can't clip it, and kept in step with its element across re-renders.
+const tip = Object.assign(document.createElement('div'), { className: 'tip', role: 'tooltip' })
+document.documentElement.append(tip)
+let tipFor: Element | null = null
+function showTip(el: Element | null) {
+  tipFor = el?.isConnected ? el : null
+  const text = tipFor?.getAttribute('data-tip')
+  tip.classList.toggle('on', !!text)
+  if (!tipFor || !text) return
+  tip.textContent = text
+  const a = tipFor.getBoundingClientRect(), t = tip.getBoundingClientRect(), above = a.top - t.height - 6
+  tip.style.left = `${Math.min(Math.max(8, a.left + a.width / 2 - t.width / 2), innerWidth - t.width - 8)}px`
+  tip.style.top = `${above >= 8 ? above : a.bottom + 6}px`
+}
+const tipTarget = (e: Event) => (e.target instanceof Element ? e.target.closest('[data-tip]') : null)
+document.addEventListener('pointerover', e => showTip(tipTarget(e)))
+document.addEventListener('pointerout', e => { if (!e.relatedTarget) showTip(null) })
+document.addEventListener('focusin', e => showTip(tipTarget(e)))
+document.addEventListener('focusout', () => showTip(null))
+addEventListener('scroll', () => showTip(null), true)
 
 /** Parses "chain url" lines; returns the problems instead of silently skipping them. */
 function applySettings(): string[] {
@@ -118,9 +145,14 @@ function startTarget() {
   if (S.d.owners.length) return
   const base = baseOwners()
   if (!base.from) return
-  S.d.owners = base.owners.map(o => ({ from: o, to: o }))
-  S.d.threshold = base.threshold
-  S.d.startedFrom = keyOf(base.from)
+  setReference(base.from)
+}
+
+function setReference(f: Pick) {
+  if (!f.state) return
+  S.d.owners = f.state.owners.map(o => ({ from: o, to: o }))
+  S.d.threshold = f.state.threshold
+  S.d.startedFrom = keyOf(f)
 }
 
 function toggle(f: Pick) {
@@ -169,7 +201,8 @@ function baseOwners() {
   const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
   const first = sel.find(f => top && key(f.state!.owners) === top[0])
   const thresholds = sel.filter(f => f === first || (top && key(f.state!.owners) === top[0])).map(f => f.state!.threshold)
-  return { from: first, owners: first?.state!.owners ?? [], threshold: thresholds.sort((a, b) => thresholds.filter(x => x === b).length - thresholds.filter(x => x === a).length)[0] ?? 1 }
+  const threshold = thresholds.sort((a, b) => thresholds.filter(x => x === b).length - thresholds.filter(x => x === a).length)[0] ?? 1
+  return { from: sel.find(f => top && key(f.state!.owners) === top[0] && f.state!.threshold === threshold) }
 }
 
 /** The owner list every Safe should end up with, straight from the stored target. */
@@ -211,6 +244,7 @@ async function loadSource() {
   const src = S.d.source.trim()
   if (!src) return void (S.lines = '')
   const current = () => S.d.source.trim() === src // a slower answer for an older paste must not land
+  S.loadingSource = true; update()
   try {
     if (src.startsWith('{')) {
       const j = JSON.parse(src)
@@ -228,6 +262,7 @@ async function loadSource() {
     }
     S.errors = []
   } catch (e) { if (!current()) return; S.lines = ''; S.sourceNote = ''; S.errors = [msg(e)] }
+  finally { if (current()) S.loadingSource = false }
   edited()
 }
 
@@ -256,12 +291,13 @@ async function prepare() {
     S.names = names
     S.prepared = targets.map(x => ({ ...x, notes: ['checking the queue…'] }))
     update()
+    // The queue checks only add notes, so they go on in the background and the link doesn't wait for them.
     await Promise.all(targets.map(async (x, i) => {
       const p = await prepareTarget(x, a.actions, names)
       if (my !== run) return
       p.notes.unshift('checking the queue…')
       S.prepared[i] = p; update()
-      await checkQueue(p, my)
+      checkQueue(p, my)
     }))
   } catch (e) { if (my === run) S.errors.push(msg(e)) }
   if (my === run) { S.preparing = false; update() }
@@ -332,6 +368,7 @@ async function loadRow(r: Row) {
   saveSigs(r); update()
   // Outbox: anything signed here that the service doesn't have yet is (re)uploaded.
   if (r.svc === 'ok' && needsWork(r)) for (const s of Object.values(r.sigs)) if (!s.posted) post(r, s)
+  findDelegations()
 }
 
 /** One request: this transaction's confirmations and execution, plus anything else at the same nonce. */
@@ -339,8 +376,10 @@ async function readService(r: Row) {
   try {
     const all = await svc.atNonce(r.tx.chainId, r.tx.safe, r.tx.nonce)
     const t = all.find(x => x.safeTxHash.toLowerCase() === r.hash.toLowerCase())
-    r.others = all.filter(x => x !== t).map(x => ({ safeTxHash: x.safeTxHash, isExecuted: x.isExecuted }))
-    r.proposed = !!t; r.svcExecuted = t?.isExecuted; r.readAt = Date.now(); r.svc = 'ok'
+    // Anyone can post an unsigned proposal, so only a trusted (or executed) competitor counts.
+    r.others = all.filter(x => x !== t && (x.trusted || x.isExecuted)).map(x => ({ safeTxHash: x.safeTxHash, isExecuted: x.isExecuted }))
+    r.proposed = !!t; r.trusted = t?.trusted; r.svcExecuted = t?.isExecuted; r.readAt = Date.now(); r.svc = 'ok'
+    r.proposer = t?.proposedByDelegate ?? (r.proposer && t && !t.trusted ? r.proposer : undefined)
     // The service is the truth: a local signature counts as uploaded only if the service has it
     // (a proposal can be deleted in Safe{Wallet}; an upload can fail after the device signed).
     for (const [k, s] of Object.entries(r.sigs)) s.posted = !!t?.confirmations.some(c => c.owner.toLowerCase() === k)
@@ -360,17 +399,53 @@ function post(r: Row, s: Sig) {
     if (s.posted) return void (s.uploading = false)
     try {
       await svc.submit(r.tx, r.hash, s.owner, s.sig, r.proposed)
-      s.posted = true; r.proposed = true; r.error = undefined
-    } catch (e) { r.error = `Signed but not uploaded: ${msg(e)}` }
+      s.posted = true; r.proposed = true; r.trusted = true; r.uploadError = undefined
+    } catch (e) { r.uploadError = `Signed but not uploaded: ${msg(e)}. It's saved in this browser and uploads again on your next visit, or with Retry upload.` }
     s.uploading = false; update()
   })
 }
 
+/**
+ * Proposes as someone who isn't an owner: a proposer's signature (or none) only creates the proposal, so it isn't
+ * kept, and a failed proposal is simply proposed again.
+ */
+function postProposal(r: Row, from: Address, sig: Hex | null) {
+  r.proposing = true
+  r.posting = (r.posting ?? Promise.resolve()).then(async () => {
+    try {
+      await svc.propose(r.tx, r.hash, from, sig, r.owners![0])
+      r.proposed = true; r.trusted = !!sig; r.proposer = from; r.uploadError = undefined
+    } catch (e) { r.uploadError = `Not proposed: ${msg(e)}. Propose again to retry.` }
+    r.proposing = false; update()
+  })
+}
+
+// Proposers are the delegates an owner named in Safe{Wallet}: they propose signed, and their signature never counts.
+// Anyone else proposes unsigned. Looked up once per account and chain, only where the account might propose; a failed
+// lookup counts as "not a proposer", so proposing still works (unsigned).
+const lookups = new Set<string>()
+function findDelegations() {
+  const a = S.account
+  if (!a) return
+  for (const r of S.rows) {
+    const k = `${a}:${r.tx.chainId}`
+    if (lookups.has(k) || r.svc !== 'ok' || (r.proposed && r.trusted !== false) || isOwner(r, a) || !needsWork(r)) continue
+    lookups.add(k); S.lookingUp++
+    svc.delegations(r.tx.chainId, a).then(d => void (S.delegations[k] = d), e => {
+      S.delegations[k] = []; S.notice = `Couldn't check proposers on ${chainName(r.tx.chainId)}, so proposals there go up unsigned: ${msg(e)}`
+    })
+      .finally(() => { S.lookingUp--; update() })
+  }
+}
+// As the service decides: for this Safe or all of the delegator's, named by a current owner, not expired.
+const isDelegate = (r: Row, a: Address) => !!S.delegations[`${a}:${r.tx.chainId}`]?.some(d =>
+  (!d.safe || d.safe.toLowerCase() === r.tx.safe.toLowerCase()) && isOwner(r, d.delegator) && (!d.expiryDate || Date.parse(d.expiryDate) > Date.now()))
+
 const isOwner = (r: Row, a?: Address | null) => !!a && !!r.owners?.some(o => o.toLowerCase() === a.toLowerCase())
 const validSigs = (r: Row) => Object.values(r.sigs).filter(s => isOwner(r, s.owner))
-function status(r: Row): { kind: Kind; text: string } {
-  if (r.fatal) return { kind: 'blocked', text: r.fatal }
-  if (r.chainNonce === undefined) return r.error ? { kind: 'unknown', text: r.error } : { kind: 'loading', text: 'loading…' }
+function status(r: Row): { kind: Kind; text: string; detail?: string } {
+  if (r.fatal) return { kind: 'blocked', text: 'hash mismatch', detail: r.fatal }
+  if (r.chainNonce === undefined) return r.error ? { kind: 'unknown', text: "couldn't read the chain" } : { kind: 'loading', text: 'loading…' }
   if (r.chainNonce > r.tx.nonce) {
     if (r.svcExecuted || r.execOk) return { kind: 'executed', text: 'executed' }
     if (r.svc === 'loading' || r.execHash) return { kind: 'loading', text: 'checking…' }
@@ -383,8 +458,16 @@ function status(r: Row): { kind: Kind; text: string } {
   return { kind: 'collecting', text: `${n} of ${t} signatures` }
 }
 const needsWork = (r: Row) => ['collecting', 'ready', 'waiting'].includes(status(r).kind)
+const loadingRow = (r: Row) => status(r).kind === 'loading' || r.svc === 'loading'
 const mine = (r: Row) => !!S.account && !!r.sigs[S.account.toLowerCase()]
 const canSign = (r: Row) => isOwner(r, S.account) && !mine(r) && status(r).kind === 'collecting'
+/**
+ * Not an owner, and we know whether the account proposes signed (a proposer) or unsigned. Unproposed, or proposed only
+ * unsigned: a proposer's signed proposal of the same transaction makes it trusted.
+ */
+const canPropose = (r: Row) => !!S.account && r.svc === 'ok' && !r.proposing && !isOwner(r, S.account) && !!S.delegations[`${S.account}:${r.tx.chainId}`]
+  && (!r.proposed || (r.trusted === false && isDelegate(r, S.account))) && status(r).kind === 'collecting'
+const proposedByMe = (r: Row) => !!S.account && !isOwner(r, S.account) && (!!r.proposing || r.proposer?.toLowerCase() === S.account.toLowerCase())
 
 // ---------------------------------------------------------------- wallet
 
@@ -402,8 +485,9 @@ async function connect(w?: Wallet) {
     provider.on?.('accountsChanged', (a: Address[]) => {
       S.account = a[0] ? getAddress(a[0]) : null
       if (S.signing || S.executing) stop('Wallet account changed, so I stopped.')
-      update()
+      findDelegations(); update()
     })
+    findDelegations()
   } catch (e) { S.notice = msg(e) }
   update()
 }
@@ -436,27 +520,35 @@ async function signAll() {
   const account = S.account!, my = ++session
   S.signing = true; S.notice = ''; update()
   const stopped = () => my !== session || S.account !== account
+  // An owner signs; a proposer signs only to propose what nobody has proposed yet.
+  const todo = (r: Row) => canSign(r) || canPropose(r)
   for (const r of S.rows) {
     if (stopped()) break
+    if (loadingRow(r)) { S.current = r; r.phase = 'waiting for this Safe to load'; update() }
     await r.loaded
-    if (!canSign(r)) continue
+    r.phase = undefined
+    if (!todo(r)) continue
     S.current = r
     try {
-      // Fresh reads right before involving the wallet: skip anything executed or completed meanwhile.
+      // Fresh reads right before involving the wallet: skip anything executed, completed or proposed meanwhile.
       r.phase = 'checking'; update()
       const nonce = Number(await client(r.tx.chainId).readContract({ address: r.tx.safe, abi: SAFE_ABI, functionName: 'nonce' }))
       if (nonce > r.tx.nonce) { r.chainNonce = nonce; continue }
       if (r.svc !== 'none' && Date.now() - r.readAt > 30_000) await readService(r)
-      if (stopped() || !canSign(r)) continue
+      if (stopped() || !todo(r)) continue
+      // Not an owner or proposer: an unsigned proposal needs no wallet.
+      if (!isOwner(r, account) && !isDelegate(r, account)) { postProposal(r, account, null); continue }
       r.phase = 'switching network'; update()
       await ask(() => ensureChain(r.tx.chainId))
       if (stopped()) break
       r.phase = 'confirm in your wallet'; update()
       const sig = normalizeSig(await ask(() => S.provider.request({ method: 'eth_signTypedData_v4', params: [account, walletTypedData(r.tx)] })))
       if ((await sigOwner(r.hash, sig))?.toLowerCase() !== account.toLowerCase()) throw new Error('The wallet returned a signature for a different account or message')
+      r.error = undefined
+      if (!isOwner(r, account)) { postProposal(r, account, sig); continue }
       // Kept even if Pause was pressed while the wallet was open: it is a valid signature.
       const s = (r.sigs[account.toLowerCase()] = { owner: account, sig, posted: false })
-      r.error = undefined; saveSigs(r)
+      saveSigs(r)
       if (svc.serviceUrl(r.tx.chainId)) post(r, s)
     } catch (e) {
       if (rejected(e)) stop('Paused: the request was rejected in your wallet.')
@@ -531,7 +623,8 @@ async function importSigs() {
 }
 
 function refresh() {
-  for (const r of S.rows) { r.error = undefined; r.svc = 'loading'; r.loaded = loadRow(r) }
+  lookups.clear()
+  for (const r of S.rows) { r.error = r.uploadError = undefined; r.svc = 'loading'; r.loaded = loadRow(r) }
   update()
 }
 
@@ -555,11 +648,11 @@ function copy(text: string) {
   )
 }
 const addr = (a: string, labels: Record<string, string> = S.batch?.labels ?? {}) =>
-  html`<span class="mono" title=${a}>${short(a)}</span>${labels[a.toLowerCase()] ? html` <span class="label">${labels[a.toLowerCase()]}</span>` : nothing}`
-const chainChip = (id: number) => html`<span class="chip" title=${chainName(id)}>${chainOf(id)?.short ?? id}</span>`
+  html`<span class="mono" data-tip=${a}>${short(a)}</span>${labels[a.toLowerCase()] ? html` <span class="label">${labels[a.toLowerCase()]}</span>` : nothing}`
+const chainChip = (id: number) => html`<span class="chip" data-tip=${chainName(id)}>${chainOf(id)?.short ?? id}</span>`
 const safeLink = (tx: { chainId: number; safe: string }, hash?: string) => {
-  const c = chainOf(tx.chainId)
-  if (c?.service) return `https://app.safe.global/${hash ? `transactions/tx?safe=${c.short}:${tx.safe}&id=multisig_${tx.safe}_${hash}` : `home?safe=${c.short}:${tx.safe}`}`
+  const c = chainOf(tx.chainId), s = c?.service
+  if (s) return `${s.app}/${hash ? `transactions/tx?safe=${s.prefix}:${tx.safe}&id=multisig_${tx.safe}_${hash}` : `home?safe=${s.prefix}:${tx.safe}`}`
   return c?.explorer ? `${c.explorer}/address/${tx.safe}` : undefined
 }
 /** A Safe's address in a list: opens the Safe in Safe{Wallet} (or the explorer), with a copy button that answers with a check. */
@@ -568,9 +661,9 @@ function safeAddr(chainId: number, safe: string, labels: Record<string, string>)
   const stop = (e: Event) => e.stopPropagation() // the row itself opens and closes
   const copied = (ok: boolean) => { S.copiedSafe = { key, ok }; update(); setTimeout(() => { if (S.copiedSafe?.key === key) (S.copiedSafe = null), update() }, 1500) }
   return html`<span class="safe-addr">
-    ${link ? html`<a class="mono" href=${link} target="_blank" rel="noopener" title=${safe} @click=${stop}>${short(safe)}</a>` : html`<span class="mono" title=${safe}>${short(safe)}</span>`}
+    ${link ? html`<a class="mono" href=${link} target="_blank" rel="noopener" data-tip=${safe} @click=${stop}>${short(safe)}</a>` : html`<span class="mono" data-tip=${safe}>${short(safe)}</span>`}
     ${labels[safe.toLowerCase()] ? html`<span class="label">${labels[safe.toLowerCase()]}</span>` : nothing}
-    <button class=${`ghost copy ${c ? (c.ok ? 'ok' : 'failed') : ''}`} title=${c && !c.ok ? "Couldn't copy" : 'Copy address'} aria-label=${c?.ok ? 'Copied' : 'Copy address'}
+    <button class=${`ghost copy ${c ? (c.ok ? 'ok' : 'failed') : ''}`} data-tip=${c ? (c.ok ? 'Copied' : "Couldn't copy") : 'Copy address'} aria-label=${c?.ok ? 'Copied' : 'Copy address'}
       @click=${(e: Event) => { stop(e); navigator.clipboard.writeText(safe).then(() => copied(true), () => copied(false)) }}>
       ${c?.ok ? html`<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-6.5"/></svg>`
       : html`<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V4A1.5 1.5 0 0 0 9 2.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5"/></svg>`}
@@ -578,6 +671,12 @@ function safeAddr(chainId: number, safe: string, labels: Record<string, string>)
   </span>`
 }
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
+/** A status mark: what it means is its tooltip, and what a screen reader says. */
+const mark = (cls: string, tip: string, glyph = '') => html`<span class=${`ico ${cls}`} role="img" aria-label=${tip} data-tip=${tip}>${glyph}</span>`
+// Two kinds of waiting: work that blocks the next step spins on that step's own (disabled) button and says what it is
+// waiting for; background work is a quiet line that blocks nothing.
+const waitButton = (text: string) => html`<button class="primary" disabled><i class="spin"></i>${text}</button>`
+const busyLine = (text: string) => html`<span class="small busy"><i class="spin"></i>${text}</span>`
 const fmt = ([t, n]: [number, number]) => `${t}-of-${n}`
 const argValue = (v: string, labels: Record<string, string>) => (isAddress(v) ? addr(v, labels) : v === 'this Safe' ? html`<b>this Safe</b>` : html`<span class="mono wrap">${v}</span>`)
 
@@ -642,7 +741,7 @@ const changesOwners = (tx: Tx) => describe(tx).some(s => s.target === 'self' && 
  * steps. Owner changes wait until every Safe is read, since which thresholds change depends on each Safe.
  */
 function reviewView(items: Item[], labels: Record<string, string>) {
-  if (items.some(i => changesOwners(i.tx) && !i.failed && (!i.owners || i.threshold === undefined))) return html`<div class="change"><div class="muted small">Reading every Safe…</div></div>`
+  if (items.some(i => changesOwners(i.tx) && !i.failed && (!i.owners || i.threshold === undefined))) return html`<div class="change"><div class="small busy"><i class="spin"></i>Reading every Safe…</div></div>`
   const groups = new Map<string, { items: Item[]; lines: { verb: unknown; view: unknown }[] }>()
   for (const i of items) {
     // An executed Safe's threshold is already the result, so its calls show the threshold they set.
@@ -708,12 +807,12 @@ function safesBody() {
         ${i ? html`<button class="ghost" aria-label="Remove this address" @click=${() => removeSafe(i)}>✕</button>` : nothing}
       </div>
       ${raw.trim() && !a ? html`<div class="small bad">Not an address</div>`
-      : a && S.looking.has(a) ? html`<div class="small muted">Searching every chain…</div>`
+      : a && S.looking.has(a) ? html`<div class="small busy"><i class="spin"></i>Searching every chain…</div>`
       : a && !list.length ? html`<div class="small bad">Not found on any chain</div>` : nothing}
       ${ok.length ? html`<div class="chips">${ok.map(f => html`<button class=${`pick ${f.selected ? 'on' : ''} ${differs(f) ? 'drift' : ''}`} aria-pressed=${f.selected}
-        title=${`${chainName(f.chainId)} · ${fmt([f.state!.threshold, f.state!.owners.length])}${differs(f) ? ' · different owners' : ''}`}
+        data-tip=${`${chainName(f.chainId)} · ${fmt([f.state!.threshold, f.state!.owners.length])}${differs(f) ? ' · different owners' : ''}`}
         @click=${() => toggle(f)}>${f.selected ? '✓ ' : ''}${chainOf(f.chainId)?.short ?? f.chainId}</button>`)}</div>` : nothing}
-      ${bad.length ? html`<div class="chips">${bad.map(f => html`<button class="pick unreachable" title=${`Couldn't reach this chain: ${f.error ?? ''}`} @click=${() => retry(f)}>${chainOf(f.chainId)?.short ?? f.chainId} ↻</button>`)}</div>` : nothing}
+      ${bad.length ? html`<div class="chips">${bad.map(f => html`<button class="pick unreachable" data-tip=${`Couldn't reach this chain: ${f.error ?? ''}. Click to try again.`} @click=${() => retry(f)}>${chainOf(f.chainId)?.short ?? f.chainId} ↻</button>`)}</div>` : nothing}
     </div>`
   }
   return html`
@@ -722,13 +821,22 @@ function safesBody() {
 }
 
 function ownersEditor() {
-  const t = targetOwners(), start = S.found.find(f => keyOf(f) === S.d.startedFrom)
+  const t = targetOwners(), references = S.found.filter(f => f.state)
   const changed = () => { S.errors = []; edited() } // a fix clears the complaint; Review checks again
   const set = (i: number, patch: Partial<OwnerRow>) => { Object.assign(S.d.owners[i], patch); changed() }
   return html`
-    ${start ? html`<div class="muted small">Starting from ${chainChip(start.chainId)} ${addr(start.safe)}</div>` : nothing}
+    <div class="reference">
+      <label><span class="muted small">Reference Safe</span><span class="select"><select aria-label="Reference Safe" ?disabled=${!references.length} @change=${(e: any) => {
+        const f = references.find(f => keyOf(f) === e.target.value)
+        if (f) { setReference(f); changed() }
+      }}>
+        ${!references.some(f => keyOf(f) === S.d.startedFrom) ? html`<option value=${S.d.startedFrom} selected disabled>${S.looking.size ? 'Loading reference…' : S.d.startedFrom ? 'Saved reference (unavailable)' : 'Choose a Safe'}</option>` : nothing}
+        ${references.map(f => html`<option value=${keyOf(f)} .selected=${keyOf(f) === S.d.startedFrom}>${chainName(f.chainId)} · ${short(f.safe)} · ${fmt([f.state!.threshold, f.state!.owners.length])}${f.selected ? '' : ' (excluded)'}</option>`)}
+      </select></span></label>
+      <div class="muted small">Changing reference copies its owners and threshold, replacing your edits. Your edited setup applies to all selected Safes.</div>
+    </div>
     <div class="owners">${S.d.owners.map((r, i) => r.from ? html`<div class="owner">
-        <span class=${r.to === null ? 'mono gone' : 'mono'} title=${r.from}>${short(r.from)}</span>
+        <span class=${r.to === null ? 'mono gone' : 'mono'} data-tip=${r.from}>${short(r.from)}</span>
         ${r.to === r.from ? html`<span></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: '', at: Date.now() })}>Swap</button><button class="ghost" @click=${() => set(i, { to: null })}>Remove</button></span>`
         : r.to === null ? html`<span></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: r.from, at: undefined })}>Undo</button></span>`
         : html`<span class="swap"><span class="muted">→</span><input class="mono" placeholder="New owner (0x… or name.eth)" .value=${live(r.to)} @input=${(ev: any) => { r.to = ev.target.value; changed() }}></span><span class="actions"><button class="ghost" @click=${() => set(i, { to: r.from, at: undefined })}>Undo</button></span>`}
@@ -770,7 +878,8 @@ function safeStage() {
   const n = selected().length
   return html`<section class="card">
     ${safesBody()}
-    ${footer(0, html`<button class="primary" ?disabled=${!n} @click=${() => goTo(2)}>Continue${n ? ` with ${plural(n, 'Safe')}` : ''}</button>`)}
+    ${footer(0, !n && S.looking.size ? waitButton('Searching every chain…')
+      : html`<button class="primary" ?disabled=${!n} @click=${() => goTo(2)}>Continue${n ? ` with ${plural(n, 'Safe')}` : ''}</button>`)}
   </section>`
 }
 
@@ -780,13 +889,15 @@ function changeStage() {
     <div class="row"><span class="segs">${mode('owners', 'Owners')}${mode('replicate', 'Other transaction')}</span></div>
     ${S.d.mode === 'owners' ? ownersEditor() : replicateEditor()}
     ${errorList()}
-    ${footer(1, html`<button class="primary" ?disabled=${S.d.mode === 'replicate' && !S.lines} @click=${() => goTo(3)}>Review ${plural(selected().length, 'Safe')}</button>`)}
+    ${footer(1, S.d.mode === 'replicate' && S.loadingSource ? waitButton('Loading the transaction…')
+      : html`<button class="primary" ?disabled=${S.d.mode === 'replicate' && !S.lines} @click=${() => goTo(3)}>Review ${plural(selected().length, 'Safe')}</button>`)}
   </section>`
 }
 
 function reviewStage() {
   const by = (k: string) => S.prepared.filter(p => prepKind(p) === k)
   const ready = by('ready'), synced = by('synced'), attention = by('attention'), loading = by('loading')
+  const queueing = S.prepared.filter(p => p.notes.includes('checking the queue…')).length
   const labels = Object.fromEntries(Object.entries(S.names).map(([n, a]) => [a.toLowerCase(), n]))
   const items: Item[] = ready.map(p => ({ tx: p.tx!, owners: p.state?.owners, threshold: p.state?.threshold }))
   const except = exceptions(items)
@@ -805,7 +916,7 @@ function reviewStage() {
       const key = keyOf(p), open = !!p.tx && S.open.has(key)
       const toggle = () => { if (!p.tx) return; open ? S.open.delete(key) : S.open.add(key); update() }
       return html`<tr class=${p.tx ? 'click' : ''} @click=${toggle}>
-        <td class="ico-cell">${k === 'ready' ? html`<span class="ico todo" title="Needs signatures"></span>` : k === 'synced' ? html`<span class="ico idle" title="Already in sync">–</span>` : k === 'attention' ? html`<span class="ico warn" title="Needs attention">!</span>` : html`<span class="ico now"></span>`}</td>
+        <td class="ico-cell">${k === 'ready' ? mark('todo', 'Needs signatures') : k === 'synced' ? mark('idle', 'Already in sync', '–') : k === 'attention' ? mark('warn', p.error ?? 'Needs attention', '!') : mark('load', 'Checking this Safe…')}</td>
         <td>${chainChip(p.chainId)}</td>
         <td>${safeAddr(p.chainId, p.safe, labels)}</td>
         <td class="grow-cell small">
@@ -821,8 +932,10 @@ function reviewStage() {
     ${S.link ? html`<input readonly class="mono small" aria-label="Signing link" .value=${live(S.link)} @focus=${(e: any) => e.target.select()}>` : nothing}`}
     ${errorList()}
     ${footer(2, html`
-      ${S.link ? html`<a class="button" href=${S.link}>Sign now</a>` : nothing}
-      <button class=${S.copied === 'failed' ? 'bad-btn' : 'primary'} @click=${copyLink} ?disabled=${S.preparing || !ready.length}>${S.copied === 'yes' ? 'Copied ✓' : S.copied === 'failed' ? 'Copy failed' : 'Copy signing link'}</button>`)}
+      ${queueing ? busyLine(`Checking Safe{Wallet} queues · ${S.prepared.length - queueing} of ${S.prepared.length}`) : nothing}
+      ${S.link ? html`<a class="button" href=${S.link} data-tip="Open the link here to sign it, or propose it, so it shows up in Safe{Wallet}">Propose now</a>` : nothing}
+      ${S.preparing ? waitButton(S.prepared.length ? `Building ${S.prepared.length - loading.length} of ${S.prepared.length}…` : 'Reading every Safe…')
+      : html`<button class=${S.copied === 'failed' ? 'bad-btn' : 'primary'} @click=${copyLink} ?disabled=${!ready.length}>${S.copied === 'yes' ? 'Copied ✓' : S.copied === 'failed' ? 'Copy failed' : 'Copy signing link'}</button>`}`)}
   </section>`
 }
 
@@ -830,37 +943,61 @@ const composeView = () => html`${stageBar(S.stage)}${S.stage === 1 ? safeStage()
 
 // ---------------------------------------------------------------- batch view
 
-/** The connected signer's checklist: ✓ you signed it, ○ it needs your signature, – nothing for you to do, ! a problem. */
-function icon(r: Row, kind: Kind) {
-  if (r === S.current) return html`<span class="ico now"></span>`
-  if (kind === 'blocked') return html`<span class="ico warn" title="Problem">!</span>`
-  if (!S.account) return html`<span class="ico todo quiet"></span>`
-  if (mine(r)) return html`<span class="ico done" title="You signed this">✓</span>`
-  if (canSign(r)) return html`<span class="ico todo" title="Needs your signature"></span>`
-  return html`<span class="ico idle" title="Nothing for you to do">–</span>`
+/**
+ * The connected account's checklist: ✓ you signed or proposed it, ○ it needs you, – nothing for you to do. A dashed
+ * ring is yours but not in the Safe service yet (yellow: the upload failed), ! is a problem, a thin spinner still
+ * loading. The details are in each mark's tooltip.
+ */
+function icon(r: Row, st: ReturnType<typeof status>) {
+  if (r === S.current) return mark('now', r.phase ?? 'Working on this Safe')
+  if (st.kind === 'blocked') return mark('warn', st.detail ?? st.text, '!')
+  if (r.uploadError) return mark('pending failed', r.uploadError)
+  if (r.error) return mark('warn', r.error, '!')
+  if (loadingRow(r)) return mark('load', 'Reading this Safe…')
+  if (S.account && !isOwner(r, S.account) && lookups.has(`${S.account}:${r.tx.chainId}`) && !S.delegations[`${S.account}:${r.tx.chainId}`]) return mark('load', 'Checking whether you can propose this…')
+  if (!S.account) return mark('todo quiet', 'Connect a wallet to see what you can do here')
+  if (r.proposing || (mine(r) && r.sigs[S.account.toLowerCase()].uploading)) return mark('pending', 'Uploading to the Safe service…')
+  if (mine(r)) return mark('done', 'You signed this', '✓')
+  if (proposedByMe(r)) return mark('done', r.trusted === false ? 'You proposed this unsigned: Safe{Wallet} lists it once an owner signs' : 'You proposed this', '✓')
+  if (canSign(r)) return mark('todo', 'Needs your signature')
+  if (canPropose(r)) return mark('todo', isDelegate(r, S.account) ? 'Not proposed yet: you can, as a proposer' : 'Not proposed yet: you can, unsigned')
+  return mark('idle', 'Nothing for you to do', '–')
 }
 const KIND_CLASS: Record<Kind, string> = { loading: 'muted', collecting: '', ready: 'good', waiting: 'muted', executed: 'good', blocked: 'bad', unknown: 'warn' }
 
 
 function progressView() {
-  const yours = S.account ? S.rows.filter(r => mine(r) || canSign(r)) : []
-  const signed = yours.filter(mine).length, remaining = yours.length - signed
-  const loading = S.rows.some(r => status(r).kind === 'loading')
+  // An owner's work is signing; a proposer's is proposing what nobody has proposed yet.
+  const signs = S.account ? S.rows.filter(r => mine(r) || canSign(r)) : []
+  const proposals = S.account ? S.rows.filter(r => proposedByMe(r) || canPropose(r)) : []
+  const yours = [...signs, ...proposals]
+  const signed = signs.filter(mine).length, proposed = proposals.filter(proposedByMe).length
+  const done = signed + proposed, remaining = yours.length - done
+  const both = signs.length > 0 && proposals.length > 0
+  const action = [signs.length - signed && `sign ${signs.length - signed}`, proposals.length - proposed && `propose ${proposals.length - proposed}`].filter(Boolean).join(', ').replace(/^./, c => c.toUpperCase())
+  const progress = [signs.length && `signed ${signed} of ${signs.length}`, proposals.length && `proposed ${proposed} of ${proposals.length}`].filter(Boolean).join(', ')
+  const working = both ? 'Signing and proposing' : proposals.length ? 'Proposing' : 'Signing'
+  const finished = both ? `Signed ${signs.length}, proposed ${proposals.length}` : `${proposals.length ? 'Proposed' : 'Signed'} all ${yours.length}`
+  const unsigned = S.account ? proposals.filter(r => !proposedByMe(r) && !isDelegate(r, S.account!)).length : 0
+  const reading = S.rows.filter(loadingRow).length, read = S.rows.length - reading
+  const waitText = reading ? `Reading Safes · ${read} of ${S.rows.length}` : S.lookingUp ? 'Checking proposer access…' : ''
+  // Nothing to do yet and still reading: that blocks the action, so its button says so (and the quiet line stays out).
+  const blocked = !!S.account && !S.signing && !yours.length && !!waitText
   const ready = S.rows.filter(r => status(r).kind === 'ready').length
   const executed = S.rows.filter(r => status(r).kind === 'executed').length
   const busy = S.signing || S.executing || S.waiting
   const pending = (r: Row) => (r.svc === 'ok' ? unshared(r) : [])
-  const uploading = S.rows.reduce((n, r) => n + pending(r).filter(x => x.uploading).length, 0)
+  const uploading = S.rows.reduce((n, r) => n + pending(r).filter(x => x.uploading).length, 0) + S.rows.filter(r => r.proposing).length
   const notUploaded = S.rows.reduce((n, r) => n + pending(r).filter(x => !x.uploading).length, 0)
   const manual = S.rows.filter(r => r.svc === 'none' && needsWork(r) && Object.keys(r.sigs).length)
-  const bar = html`<div class="bar"><i style=${`width:${yours.length ? Math.round((signed / yours.length) * 100) : 0}%`}></i></div>`
+  const bar = html`<div class="bar"><i style=${`width:${yours.length ? Math.round((done / yours.length) * 100) : 0}%`}></i></div>`
   const cur = S.current
   return html`
   ${!S.account ? html`<div class="row">
       <button class="primary" @click=${() => connect()}>Connect wallet</button>
       ${S.choosing ? S.wallets.map(w => html`<button @click=${() => connect(w)}><img src=${w.info.icon} alt="">${w.info.name}</button>`) : nothing}
     </div>`
-  : S.signing ? html`<div class="row"><b class="grow">Signing ${Math.min(signed + 1, yours.length)} of ${yours.length}</b><button @click=${() => stop()}>Pause</button></div>
+  : S.signing ? html`<div class="row"><b class="grow">${working} ${Math.min(done + 1, yours.length)} of ${yours.length}</b><button @click=${() => stop()}>Pause</button></div>
       ${bar}
       ${cur ? html`<div class="current">
         <div><b>${chainName(cur.tx.chainId)}</b> · ${addr(cur.tx.safe)} · <span class="muted">${cur.phase ?? ''}</span></div>
@@ -869,20 +1006,26 @@ function progressView() {
         <div class="hashes"><span class="muted">message hash</span><span class="mono">${messageHash(cur.tx)}</span></div>
       </div>` : nothing}`
   : remaining ? html`<div class="row">
-      <span class="grow">${addr(S.account)} · signed ${signed} of ${yours.length}</span>
-      <button class="primary" @click=${signAll} ?disabled=${busy}>${S.waiting ? 'Waiting for wallet…' : `Sign ${remaining}`}</button>
+      <span class="grow">${addr(S.account)} · ${progress}</span>
+      <button class="primary" @click=${signAll} ?disabled=${busy}
+        data-tip=${unsigned ? "You're not an owner or proposer here, so these go up unsigned: Safe{Wallet} lists them once an owner signs" : nothing}>${S.waiting ? 'Waiting for wallet…' : action}</button>
     </div>${bar}`
   : yours.length ? html`<div class="row">
-      <span class="done-msg grow">✓ Signed all ${yours.length}${uploading && !notUploaded ? html` <span class="muted small">uploading…</span>` : nothing}</span>
+      <span class="done-msg grow">✓ ${finished}${uploading && !notUploaded ? html` <span class="muted small">uploading…</span>` : nothing}</span>
       ${notUploaded ? html`<button @click=${refresh}>Retry upload (${notUploaded})</button>` : nothing}
       ${manual.length ? html`<button @click=${() => copy(exportSigs())}>Copy signatures for ${manual.map(r => chainChip(r.tx.chainId))}</button>` : nothing}
     </div>${bar}`
-  : html`<div class="muted">${loading ? 'Loading…' : html`${addr(S.account)} · nothing to sign`}</div>`}
+  : blocked ? html`<div class="row">
+      <span class="grow">${addr(S.account)}</span>
+      ${waitButton(waitText)}
+    </div>`
+  : html`<div class="muted">${addr(S.account)} · nothing to sign or propose</div>`}
   <div class="row small">
     <span class="grow muted">Executed ${executed} of ${S.rows.length}</span>
+    ${waitText && !blocked ? busyLine(waitText) : nothing}
     ${S.account && ready && !busy ? html`<button @click=${executeAll}>Execute ${ready}</button>` : nothing}
     ${S.executing ? html`<button @click=${() => stop()}>Stop</button>` : nothing}
-    <button class="ghost" aria-label="Refresh" title="Refresh" @click=${refresh} ?disabled=${busy}>↻</button>
+    <button class="ghost" aria-label="Refresh" data-tip="Read every Safe again" @click=${refresh} ?disabled=${busy}>↻</button>
   </div>
   ${!storageOk ? html`<div class="notice">This browser can't save signatures</div>` : nothing}
   ${S.notice ? html`<div class="notice">${S.notice}</div>` : nothing}`
@@ -899,7 +1042,7 @@ function batchView() {
   <section class="card">
     <div class="row">
       <h2 class="grow">${b.title}</h2>
-      <span class="fingerprint" title="Fingerprint of every transaction in this link. Confirm it with whoever sent it.">${S.id}</span>
+      <span class="fingerprint" tabindex="0" data-tip="Fingerprint of every transaction in this link. Confirm it with whoever sent it.">${S.id}</span>
       <button class="ghost" @click=${edit}>Edit</button>
     </div>
     ${reviewView(items, b.labels)}
@@ -914,14 +1057,13 @@ function batchView() {
       const conflict = r.others.some(o => !o.isExecuted) && needsWork(r)
       const toggle = () => { r.open = !r.open; update() }
       return html`<tr class=${`click ${r === S.current ? 'active' : ''}`} @click=${toggle}>
-        <td class="ico-cell">${icon(r, st.kind)}</td>
+        <td class="ico-cell">${icon(r, st)}</td>
         <td>${chainChip(r.tx.chainId)}</td>
         <td>${safeAddr(r.tx.chainId, r.tx.safe, b.labels)}</td>
         <td class="grow-cell">
-          <span class=${KIND_CLASS[st.kind]}>${r === S.current && r.phase ? r.phase : st.text}</span>
+          <span class=${KIND_CLASS[st.kind]} data-tip=${r.proposed && r.trusted === false && st.kind === 'collecting' ? 'Proposed unsigned: Safe{Wallet} lists it once an owner signs' : nothing}>${r === S.current && r.phase ? r.phase : st.text}</span>
           ${except(S.rows.indexOf(r)) ? html`<div class="small">${except(S.rows.indexOf(r))}</div>` : nothing}
           ${conflict ? html`<div class="small warn">⚠ competes with another transaction at nonce ${r.tx.nonce}</div>` : nothing}
-          ${r.error && st.kind !== 'unknown' ? html`<div class="small bad">${r.error}</div>` : nothing}
         </td>
         <td><button class="ghost disclose" aria-expanded=${!!r.open} aria-label=${`Details for ${chainName(r.tx.chainId)}`} @click=${(e: Event) => { e.stopPropagation(); toggle() }}>${r.open ? '▾' : '▸'}</button></td>
       </tr>
@@ -970,7 +1112,7 @@ function settingsView() {
       update()
     }}>Save</button></div>
     <details><summary>Supported chains (${CHAINS.length})</summary>
-      <div class="chains">${CHAINS.map(c => html`<div><span class="chip">${c.short}</span> ${c.id} ${c.name}${c.service ? '' : html` <span class="muted">(no service)</span>`}</div>`)}</div>
+      <div class="chains">${CHAINS.map(c => html`<div><span class="chip">${c.short}</span> ${c.id} ${c.name}${!c.service ? html` <span class="muted">(no service)</span>` : !c.service.url.startsWith('https://api.safe.global/') ? html` <span class="muted">(service at ${new URL(c.service.url).host})</span>` : nothing}</div>`)}</div>
     </details>
   </section></div>`
 }
@@ -996,6 +1138,7 @@ function route() {
 // Leaving a link fires both events: each one handles its own direction, so a move routes once.
 window.addEventListener('hashchange', () => { if (location.hash) route() })
 window.addEventListener('popstate', () => { if (!location.hash) route() })
-// Signatures are kept in localStorage and re-uploaded on the next visit; only warn mid-session.
-window.addEventListener('beforeunload', e => { if (S.signing || S.executing || S.waiting) e.preventDefault() })
+// Signatures are kept in localStorage and re-uploaded on the next visit; only warn mid-session, or while a proposal
+// (whose signature isn't kept) is still uploading.
+window.addEventListener('beforeunload', e => { if (S.signing || S.executing || S.waiting || S.rows.some(r => r.proposing)) e.preventDefault() })
 route()

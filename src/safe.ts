@@ -69,7 +69,7 @@ export function chainOf(key: string | number): Chain | undefined {
   if (id === undefined) return undefined
   const rpcs = config.rpc[id] ? [config.rpc[id]] : c?.rpcs
   if (!rpcs?.length) return undefined
-  return { ...(c ?? { id, name: `Chain ${id}`, short: String(id), symbol: 'ETH', explorer: '', service: false }), rpcs }
+  return { ...(c ?? { id, name: `Chain ${id}`, short: String(id), symbol: 'ETH', explorer: '' }), rpcs }
 }
 export const chainName = (id: number) => chainOf(id)?.name ?? `Chain ${id}`
 

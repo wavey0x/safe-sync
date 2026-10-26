@@ -18,16 +18,19 @@ const TRUSTED_DELEGATECALL = new Set([
 type Confirmation = { owner: Address; submissionDate: string; transactionHash: null; signature: Hex; signatureType: string }
 type Stored = {
   chainId: number; safe: Address; to: Address; value: bigint; data: Hex | null; operation: number; gasToken: Address; safeTxGas: bigint
-  baseGas: bigint; gasPrice: bigint; refundReceiver: Address; nonce: bigint; safeTxHash: Hex; proposer: Address; origin: string
+  baseGas: bigint; gasPrice: bigint; refundReceiver: Address; nonce: bigint; safeTxHash: Hex; proposer: Address; proposedByDelegate: Address | null; origin: string
   submissionDate: string; modified: string; trusted: boolean; confirmations: Confirmation[]
   executed?: { transactionHash: Hex; blockNumber: number; executor: Address; executionDate: string }
 }
 type Errors = Record<string, string[]>
+/** A SafeContractDelegate row: `delegator` (an owner) lets `delegate` propose, for `safe` or (null) all of the delegator's Safes. */
+export type Delegation = { chainId: number; safe: Address | null; delegate: Address; delegator: Address; label: string; expiryDate: string | null }
 
 export type MockOptions = { port?: number; rpc: Record<number, string>; rps?: number; log?: boolean }
 
 const isChecksummed = (a: unknown): a is Address => typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a) && getAddress(a) === a
 const pyList = (xs: string[]) => `[${xs.map(x => `'${x}'`).join(', ')}]`
+const pySet = (xs: Iterable<string>) => { const l = [...xs]; return l.length ? `{${l.map(x => `'${x}'`).join(', ')}}` : 'set()' }
 const snake = (k: string) => k.replace(/[A-Z]/g, c => `_${c.toLowerCase()}`)
 const camel = (k: string) => k.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
 const now = () => new Date().toISOString()
@@ -73,6 +76,10 @@ function validateFields(body: any, spec: Record<string, { kind: 'address' | 'int
 
 export function startMockService(opts: MockOptions) {
   const txs = new Map<string, Stored>()
+  const delegates: Delegation[] = [] // seeded by the sandbox and tests; the real service adds them through a signed POST
+  /** SafeContractDelegateManager.get_for_safe: for this Safe or every Safe, named by a current owner, not expired. */
+  const delegationsFor = (chainId: number, safe: Address, owners: Address[]) => delegates.filter(d =>
+    d.chainId === chainId && (d.safe === null || d.safe === safe) && owners.includes(d.delegator) && (d.expiryDate === null || Date.parse(d.expiryDate) > Date.now()))
   const clients = new Map<number, PublicClient>()
   const client = (chainId: number) => {
     if (!clients.has(chainId)) clients.set(chainId, createPublicClient({ transport: http(opts.rpc[chainId]) }) as PublicClient)
@@ -126,7 +133,7 @@ export function startMockService(opts: MockOptions) {
     safeTxGas: String(t.safeTxGas), baseGas: String(t.baseGas), gasPrice: String(t.gasPrice), refundReceiver: t.refundReceiver,
     nonce: String(t.nonce), executionDate: t.executed?.executionDate ?? null, submissionDate: t.submissionDate, modified: t.modified,
     blockNumber: t.executed?.blockNumber ?? null, transactionHash: t.executed?.transactionHash ?? null, safeTxHash: t.safeTxHash,
-    proposer: t.proposer, proposedByDelegate: null, executor: t.executed?.executor ?? null, isExecuted: !!t.executed,
+    proposer: t.proposer, proposedByDelegate: t.proposedByDelegate, executor: t.executed?.executor ?? null, isExecuted: !!t.executed,
     isSuccessful: t.executed ? true : null, ethGasPrice: null, maxFeePerGas: null, maxPriorityFeePerGas: null, gasUsed: null,
     fee: null, payment: null, origin: t.origin, dataDecoded: null, confirmationsRequired: threshold, confirmations: t.confirmations,
     trusted: t.trusted, signatures: null,
@@ -161,25 +168,31 @@ export function startMockService(opts: MockOptions) {
       if (same) return fail(`Tx with safe-tx-hash=${hash} for safe=${safe} was already executed in tx-hash=${same.executed!.transactionHash}`)
       return fail(`Tx with nonce=${a.nonce} for safe=${safe} already executed in tx-hash=${executed[0].executed!.transactionHash}`)
     }
-    if (!owners.includes(a.sender)) return fail(`Sender=${a.sender} is not an owner or delegate. Current owners=${pyList(owners)}. Delegates=set()`)
+    const delegations = delegationsFor(chainId, safe, owners), named = new Set(delegations.map(d => d.delegate))
+    const allowed = (x: Address) => owners.includes(x) || named.has(x)
+    if (!allowed(a.sender)) return fail(`Sender=${a.sender} is not an owner or delegate. Current owners=${pyList(owners)}. Delegates=${pySet(named)}`)
     const sigs = await parseSignatures(chainId, safe, hash, a.signature)
     const signers: Address[] = []
     for (const s of sigs) {
       if (!s.valid || !s.owner) return fail(`Signature=${s.signature} for owner=${s.owner} is not valid`)
-      if (!owners.includes(s.owner)) return fail(`Signer=${s.owner} is not an owner or delegate. Current owners=${pyList(owners)}. Delegates=set()`)
+      // An address that is both owner and delegate is treated as owner
+      if (named.has(s.owner) && !owners.includes(s.owner) && sigs.length > 1) return fail('Just one signature is expected if using delegates')
+      if (!allowed(s.owner)) return fail(`Signer=${s.owner} is not an owner or delegate. Current owners=${pyList(owners)}. Delegates=${pySet(named)}`)
       if (signers.includes(s.owner)) return fail(`Signature for owner=${s.owner} is duplicated`)
       signers.push(s.owner)
     }
     if (signers.length && !signers.includes(a.sender)) return fail(`Signature does not match sender=${a.sender}. Calculated owners=${pyList(signers)}`)
+    // A delegate proposes in its delegator's name; its signature makes the proposal trusted but is no confirmation.
+    const byDelegate = owners.includes(a.sender) ? null : a.sender
     // get_or_create: re-proposing an existing, unexecuted transaction just adds confirmations
     let t = txs.get(hash)
     if (!t) {
       t = { chainId, safe, to: a.to, value: a.value, data: a.data, operation: Number(a.operation), gasToken, safeTxGas: a.safe_tx_gas, baseGas: a.base_gas,
-        gasPrice: a.gas_price, refundReceiver, nonce: a.nonce, safeTxHash: hash, proposer: a.sender, origin: a.origin ?? '{}',
-        submissionDate: now(), modified: now(), trusted: signers.length > 0, confirmations: [] }
+        gasPrice: a.gas_price, refundReceiver, nonce: a.nonce, safeTxHash: hash, proposer: byDelegate ? delegations.find(d => d.delegate === byDelegate)!.delegator : a.sender,
+        proposedByDelegate: byDelegate, origin: a.origin ?? '{}', submissionDate: now(), modified: now(), trusted: signers.length > 0, confirmations: [] }
       txs.set(hash, t)
     } else if (signers.length && !t.trusted) t.trusted = true
-    for (const s of sigs) if (!t.confirmations.some(c => c.owner === s.owner)) t.confirmations.push({ owner: s.owner!, submissionDate: now(), transactionHash: null, signature: s.signature, signatureType: s.type })
+    for (const s of sigs) if (owners.includes(s.owner!) && !t.confirmations.some(c => c.owner === s.owner)) t.confirmations.push({ owner: s.owner!, submissionDate: now(), transactionHash: null, signature: s.signature, signatureType: s.type })
     return [201, null]
   }
 
@@ -265,6 +278,13 @@ export function startMockService(opts: MockOptions) {
           const [status, data] = await confirm(r[1], body)
           return reply(status, data)
         }
+        if (req.method === 'GET' && path === '/v2/delegates/') {
+          // DelegateListFilter: needs at least one filter; expired delegations are listed too.
+          const q = url.searchParams, filters = (['safe', 'delegate', 'delegator', 'label'] as const).filter(k => q.get(k))
+          if (!filters.length) return reply(400, ['At least one query param must be provided'])
+          const rows = delegates.filter(d => d.chainId === chainId && filters.every(k => String(d[k]) === q.get(k)))
+          return reply(200, { count: rows.length, next: null, previous: null, results: rows.map(({ chainId: _, ...d }) => d) })
+        }
         return reply(404, { detail: 'Not found.' })
       })().catch(e => reply(500, { detail: String(e?.shortMessage ?? e?.message ?? e) }))
       if (opts.log) console.log(`${req.method} ${url.pathname}${url.search} → ${res.status}`)
@@ -275,7 +295,7 @@ export function startMockService(opts: MockOptions) {
     port: server.port,
     /** Base URL for a chain, in the same shape as https://api.safe.global/tx-service/<short>. */
     url: (chainId: number) => `http://127.0.0.1:${server.port}/tx-service/${CHAINS.find(c => c.id === chainId)?.short ?? chainId}`,
-    txs,
+    txs, delegates,
     stop: () => server.stop(true),
   }
 }

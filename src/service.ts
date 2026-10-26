@@ -8,30 +8,33 @@ export const config = { service: {} as Record<number, string>, apiKey: '', gapMs
 
 export function serviceUrl(chainId: number): string | undefined {
   if (config.service[chainId]) return config.service[chainId].replace(/\/+$/, '').replace(/\/api$/, '')
-  const c = chainOf(chainId)
-  return c?.service ? `https://api.safe.global/tx-service/${c.short}` : undefined
+  return chainOf(chainId)?.service?.url
 }
 
-// Safe allows 2 req/s per IP without a key, 5 req/s per account with one, but teammates behind one
-// network or sharing one key share that budget. So each browser stays at 1 req/s (gapMs) and backs off on 429.
-let last = 0, queue: Promise<unknown> = Promise.resolve()
+// Safe allows 2 req/s per IP without a key, 5 req/s per account with one, but teammates behind one network or
+// sharing one key share that budget. So each browser stays at 1 req/s (gapMs), 2.5 with a key, and backs off on 429.
+// Each service host has its own pace: a community-run service doesn't wait behind Safe's.
+const paces = new Map<string, { last: number; queue: Promise<unknown> }>()
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
-function slot(): Promise<void> {
-  const next = queue.then(async () => {
-    await sleep(Math.max(0, last + config.gapMs - Date.now()))
-    last = Date.now()
+function slot(host: string, gap: number): Promise<void> {
+  const p = paces.get(host) ?? { last: 0, queue: Promise.resolve() }
+  paces.set(host, p)
+  const next = p.queue.then(async () => {
+    await sleep(Math.max(0, p.last + gap - Date.now()))
+    p.last = Date.now()
   })
-  queue = next
+  p.queue = next
   return next
 }
 
 async function api(chainId: number, path: string, body?: unknown): Promise<Response> {
   const base = serviceUrl(chainId)
   if (!base) throw new Error('No Safe Transaction Service for this chain')
+  const host = new URL(base).host, keyed = !!config.apiKey && host === 'api.safe.global'
   for (let attempt = 0; ; attempt++) {
-    await slot()
+    await slot(host, keyed ? config.gapMs * 0.4 : config.gapMs)
     const headers: Record<string, string> = { 'content-type': 'application/json' }
-    if (config.apiKey && base.includes('api.safe.global')) headers.authorization = `Bearer ${config.apiKey}`
+    if (keyed) headers.authorization = `Bearer ${config.apiKey}`
     const res = await fetch(`${base}/api${path}`, { method: body ? 'POST' : 'GET', headers, body: body ? JSON.stringify(body) : undefined })
     if ((res.status === 429 || res.status >= 500) && attempt < 4) {
       if ((await res.clone().text()).includes('Monthly quota')) return res
@@ -47,7 +50,7 @@ async function fail(res: Response): Promise<never> {
   throw new Error(`Safe service ${res.status}: ${t.slice(0, 300)}`)
 }
 
-export type ServiceTx = { safe: Address; to: Address; value: string; data: Hex | null; operation: number; nonce: string; safeTxHash: Hex; isExecuted: boolean; confirmations: { owner: Address; signature: Hex }[] }
+export type ServiceTx = { safe: Address; to: Address; value: string; data: Hex | null; operation: number; nonce: string; safeTxHash: Hex; isExecuted: boolean; trusted: boolean; proposedByDelegate: Address | null; confirmations: { owner: Address; signature: Hex }[] }
 
 export async function getTx(chainId: number, hash: Hex): Promise<ServiceTx | null> {
   const res = await api(chainId, `/v2/multisig-transactions/${hash}/`)
@@ -56,9 +59,13 @@ export async function getTx(chainId: number, hash: Hex): Promise<ServiceTx | nul
   return res.json()
 }
 
-/** Every transaction at one nonce of a Safe, executed or not: ours (with its confirmations) and any competitor, in one request. */
+/**
+ * Every transaction at one nonce of a Safe, executed or not: ours (with its confirmations) and any competitor, in one
+ * request. Untrusted (unsigned) proposals are included, since ours may be one; anyone can post those, so a caller
+ * counts an untrusted competitor as noise.
+ */
 export async function atNonce(chainId: number, safe: Address, nonce: number): Promise<ServiceTx[]> {
-  const res = await api(chainId, `/v2/safes/${safe}/multisig-transactions/?nonce=${nonce}&limit=20`)
+  const res = await api(chainId, `/v2/safes/${safe}/multisig-transactions/?nonce=${nonce}&trusted=false&limit=20`)
   if (!res.ok) await fail(res)
   return (await res.json()).results
 }
@@ -70,16 +77,39 @@ export async function queued(chainId: number, safe: Address, nonce: number): Pro
   return (await res.json()).results.map((t: any) => ({ nonce: Number(t.nonce), safeTxHash: t.safeTxHash }))
 }
 
+const proposal = (tx: Tx, hash: Hex, sender: Address, signature: Hex | null, origin: Record<string, string> = {}) => api(tx.chainId, `/v2/safes/${tx.safe}/multisig-transactions/`, {
+  to: tx.to, value: tx.value, data: tx.data === '0x' ? null : tx.data, operation: tx.operation,
+  safeTxGas: '0', baseGas: '0', gasPrice: '0', gasToken: ZERO, refundReceiver: ZERO, nonce: String(tx.nonce),
+  contractTransactionHash: hash, sender, signature, origin: JSON.stringify({ name: 'Safe Sync', ...origin }),
+})
+
 /** Posts one signature: proposes the transaction if nobody has yet, otherwise adds a confirmation. */
 export async function submit(tx: Tx, hash: Hex, owner: Address, signature: Hex, proposed: boolean): Promise<void> {
   const confirm = () => api(tx.chainId, `/v1/multisig-transactions/${hash}/confirmations/`, { signature })
-  const propose = () => api(tx.chainId, `/v2/safes/${tx.safe}/multisig-transactions/`, {
-    to: tx.to, value: tx.value, data: tx.data === '0x' ? null : tx.data, operation: tx.operation,
-    safeTxGas: '0', baseGas: '0', gasPrice: '0', gasToken: ZERO, refundReceiver: ZERO, nonce: String(tx.nonce),
-    contractTransactionHash: hash, sender: owner, signature, origin: JSON.stringify({ name: 'Safe Sync' }),
-  })
+  const propose = () => proposal(tx, hash, owner, signature)
   let res = await (proposed ? confirm() : propose())
   // Someone else proposed (or the proposal vanished) in the meantime: try the other route once.
   if (!res.ok && res.status < 500) res = await (proposed ? propose() : confirm())
   if (!res.ok) await fail(res)
+}
+
+/**
+ * Proposes without being an owner. A proposer (a Safe{Wallet} delegate) signs: that makes the proposal trusted, but
+ * isn't a confirmation. Anyone else sends no signature, which the service still allows if the sender is an owner: so
+ * `owner` is named as sender, the origin says who really sent it, and the proposal stays untrusted (out of
+ * Safe{Wallet}'s queue) until an owner confirms it.
+ */
+export async function propose(tx: Tx, hash: Hex, from: Address, signature: Hex | null, owner: Address): Promise<void> {
+  const res = await (signature ? proposal(tx, hash, from, signature) : proposal(tx, hash, owner, null, { note: `unsigned, sent by ${from}` }))
+  if (!res.ok) await fail(res)
+}
+
+/** One owner naming `delegate` a proposer: for one Safe, or (safe null) every Safe the delegator owns. */
+export type Delegation = { safe: Address | null; delegate: Address; delegator: Address; expiryDate: string | null }
+
+/** Every delegation naming `delegate` on this chain, expired ones included (the service lists those too). */
+export async function delegations(chainId: number, delegate: Address): Promise<Delegation[]> {
+  const res = await api(chainId, `/v2/delegates/?delegate=${delegate}&limit=100`)
+  if (!res.ok) await fail(res)
+  return (await res.json()).results
 }

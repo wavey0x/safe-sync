@@ -99,6 +99,8 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .select select { appearance: none; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 7px; padding: 5px 30px 5px 12px; font: inherit; font-weight: 600; cursor: pointer; }
 .select select:hover { border-color: var(--accent); } .select select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .select::after { content: ''; position: absolute; right: 12px; top: calc(50% - 5px); width: 6px; height: 6px; border: solid var(--muted); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); pointer-events: none; }
+.reference { display: grid; gap: 4px; }
+.reference .select, .reference select { width: 100%; min-width: 0; }
 pre { margin: 6px 0 0; white-space: pre-wrap; }
 .disclose { padding: 2px 8px; }
 
@@ -117,9 +119,24 @@ pre { margin: 6px 0 0; white-space: pre-wrap; }
 .ico.idle { color: var(--muted); }
 .ico.warn { background: var(--bad); color: #fff; }
 .ico.now { border: 2px solid var(--accent); border-top-color: transparent; animation: spin .8s linear infinite; }
+.ico.load { width: 14px; height: 14px; margin: 3px; border: 1.5px solid var(--line); border-top-color: var(--muted); animation: spin 1s linear infinite; }
+.ico.pending { border: 1.5px dashed var(--muted); }
+.ico.pending.failed { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
 @keyframes pop { 0% { transform: scale(.3); } 70% { transform: scale(1.2); } 100% { transform: scale(1); } }
 @keyframes spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .ico, .bar i { animation: none !important; transition: none; } .copy.ok path { animation: none; stroke-dasharray: none; } }
+@media (prefers-reduced-motion: reduce) { .ico, .bar i, .spin { animation: none !important; transition: none; } .copy.ok path { animation: none; stroke-dasharray: none; } }
+
+/* Waiting: a spinner on the blocked button, or a quiet line for background work */
+.spin { display: inline-block; flex: none; width: 12px; height: 12px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; }
+.busy { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.busy .spin { width: 10px; height: 10px; border-width: 1.5px; }
+button:disabled:has(.spin) { opacity: .75; cursor: progress; }
+
+/* Tooltips: one element, placed by app.ts above (or below) whatever [data-tip] is hovered or focused */
+.tip { position: fixed; left: 0; top: 0; z-index: 30; max-width: min(320px, calc(100vw - 16px)); padding: 6px 9px; border-radius: 7px;
+  background: var(--fg); color: var(--bg); font: 500 12px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; overflow-wrap: anywhere;
+  box-shadow: 0 4px 14px rgba(0,0,0,.18); pointer-events: none; visibility: hidden; }
+.tip.on { visibility: visible; }
 
 /* Tables */
 .scroll { overflow-x: auto; }

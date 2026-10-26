@@ -18,14 +18,15 @@ import { startMockService } from './mock-service'
 
 const root = decodeURIComponent(new URL('..', import.meta.url).pathname)
 const MNEMONIC = 'test test test test test test test test test test test junk'
-export const ACCOUNTS = Array.from({ length: 12 }, (_, i) => mnemonicToAccount(MNEMONIC, { addressIndex: i }))
+export const ACCOUNTS = Array.from({ length: 13 }, (_, i) => mnemonicToAccount(MNEMONIC, { addressIndex: i }))
 const [EXECUTOR, ...REST] = ACCOUNTS
 export const OWNERS = REST.slice(0, 9) // 5-of-9, like the Curve emergency Safes
 export const INCOMING = REST.slice(9, 11)
+export const PROPOSER = REST[11] // a Safe{Wallet} proposer (delegate): proposes, never signs, needs no gas
 
-// 12 chains with an official Safe service, 2 without (Fraxtal, Taiko).
+// 12 chains with Safe's own service, 2 (Fraxtal, Taiko) with one someone else runs. The mock stands in for all of
+// them: the sandbox must never reach a real service.
 export const CHAIN_IDS = [1, 10, 56, 100, 137, 146, 8453, 42161, 43114, 59144, 534352, 5000, 252, 167000]
-const NO_SERVICE = new Set([252, 167000])
 // Chain ids no real network or wallet default uses, so wallets add them as local networks.
 export const SIMPLE_CHAIN_IDS = [31338, 31339, 31340]
 
@@ -75,14 +76,14 @@ export async function startSandbox({ basePort = 0, servicePort = 0, rps = 2, log
   if (mine.some(a => INCOMING.some(i => i.address === a))) throw new Error('A signer is one of the incoming owners the rotation adds')
   const pool = ACCOUNTS.slice(1, 10).filter(a => !mine.includes(a.address)).slice(0, 9 - mine.length)
   const owners = [...pool.map(a => a.address), ...mine]
-  const ids = simple ? SIMPLE_CHAIN_IDS : CHAIN_IDS, noService = simple ? new Set<number>() : NO_SERVICE
+  const ids = simple ? SIMPLE_CHAIN_IDS : CHAIN_IDS
   const ports = basePort ? ids.map((_, i) => basePort + i) : freePorts(ids.length)
   // Never latch onto a chain someone else is running: its state would be modified and the run would fail oddly.
   const busy = (await Promise.all(ports.map(async p => ((await inUse(p)) ? p : 0)))).filter(Boolean)
   if (busy.length) throw new Error(`Port${busy.length > 1 ? 's' : ''} ${busy.join(', ')} already in use; pick another --port`)
   const chains = ids.map((id, i) => ({
     id, rpc: `http://127.0.0.1:${ports[i]}`,
-    proc: Bun.spawn(['anvil', '--chain-id', String(id), '--port', String(ports[i]), '--accounts', '12', '--silent'], { stdout: 'ignore', stderr: 'ignore' }),
+    proc: Bun.spawn(['anvil', '--chain-id', String(id), '--port', String(ports[i]), '--accounts', String(ACCOUNTS.length), '--silent'], { stdout: 'ignore', stderr: 'ignore' }),
   }))
   const stopChains = () => chains.forEach(c => c.proc.kill())
   try {
@@ -122,10 +123,10 @@ export async function startSandbox({ basePort = 0, servicePort = 0, rps = 2, log
     // `targets`/`actions` are the change in the text format (tests); `draft` is the same change for the app's editor.
     const finish = (service: ReturnType<typeof startMockService>, s: { team: Address; original?: Address; scroll141?: Address; targets: string; actions: string; owners: Address[]; draft: Record<string, unknown> }) => ({
       ...s, chains: chains.map(({ id, rpc }) => ({ id, rpc })), rpc, service,
-      serviceChains: ids.filter(id => !noService.has(id)), noServiceChains: [...noService],
+      serviceChains: ids,
       settings: {
         rpc: chains.map(c => `${c.id} ${c.rpc}`).join('\n'),
-        service: ids.filter(id => !noService.has(id)).map(id => `${id} ${service.url(id)}`).join('\n'),
+        service: ids.map(id => `${id} ${service.url(id)}`).join('\n'),
         apiKey: '',
       },
       stop: () => { service.stop(); stopChains() },
@@ -167,7 +168,9 @@ export async function startSandbox({ basePort = 0, servicePort = 0, rps = 2, log
     const linea = await prepareTarget({ chainId: 59144, safe: team }, parsed, {})
     await execute(linea.tx!)
 
-    const service = startMockService({ port: servicePort, rps, rpc: Object.fromEntries(CHAIN_IDS.filter(id => !NO_SERVICE.has(id)).map(id => [id, rpc[id]])), log })
+    const service = startMockService({ port: servicePort, rps, rpc, log })
+    // Owner 2 (never rotated out) named the proposer for all of its Safes, on every chain with a service.
+    for (const id of CHAIN_IDS) service.delegates.push({ chainId: id, safe: null, delegate: PROPOSER.address, delegator: owners[1], label: 'Sandbox proposer', expiryDate: null })
     const post = (chainId: number, path: string, body: unknown) =>
       fetch(`${service.url(chainId)}/api${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
     const propose = async (tx: Tx, signer: (typeof OWNERS)[number]) => {
@@ -202,7 +205,8 @@ if (import.meta.main) {
   const runId = String(Date.now())
   const labels = ACCOUNTS.map(a => {
     const owner = sb.owners.indexOf(a.address), incoming = INCOMING.findIndex(i => i.address === a.address)
-    return { address: a.address, label: owner >= 0 ? `Owner ${owner + 1}${signers.includes(a.address) ? ' (yours)' : ''}` : incoming >= 0 ? `Incoming owner ${incoming + 1}` : 'Not an owner' }
+    const proposer = sb.service.delegates.some(d => d.delegate === a.address)
+    return { address: a.address, label: owner >= 0 ? `Owner ${owner + 1}${signers.includes(a.address) ? ' (yours)' : ''}` : incoming >= 0 ? `Incoming owner ${incoming + 1}` : proposer ? 'Proposer (not an owner)' : 'Not an owner' }
   })
   const draft = { mode: 'owners', source: '', excluded: [], ...sb.draft }
   const cfg = `window.__SANDBOX__=${JSON.stringify({ runId, rpcs: sb.rpc, accounts: labels, settings: sb.settings, draft, walletOnly: !simple })};`
@@ -228,12 +232,13 @@ Safe Sync simple sandbox: http://localhost:${server.port}
 ` : `
 Safe Sync sandbox: http://localhost:${server.port}
 
-  ${CHAIN_IDS.length} local chains (${sb.noServiceChains.length} without a Safe service), mock Safe service on :${sb.service.port}
+  ${CHAIN_IDS.length} local chains, one mock Safe service for all of them on :${sb.service.port}
   Team Safe ${sb.team} (5-of-9) on every chain, original Safe ${sb.original} on Ethereum, Safe 1.4.1 ${sb.scroll141} on Scroll${signers.length ? `\n  Your signers are owners ${signers.map((a, i) => `${9 - signers.length + i + 1} (${a})`).join(', ')} on all of them, with 100 ETH on every local chain` : ''}
   Set up to include: different nonces, a rotation already applied on Linea, a conflicting queued tx on Gnosis,
-  and the same rotation already queued on the original Safe with one signature.
+  the same rotation already queued on the original Safe with one signature, and a proposer (Safe{Wallet}
+  delegate of owner 2) that proposes signed but never confirms. "Not an owner" proposes unsigned.
 
-  The draft is filled in: Prepare → Create signing link → Open to sign.
+  The draft is filled in: Review → Copy signing link → Propose now.
   Choose who signs in the "Sandbox wallet" box at the bottom left. Other wallets are hidden here: these chains
   use real chain ids, so a real wallet would send executions to the real networks (use --simple for that).
   Ctrl-C to stop.
