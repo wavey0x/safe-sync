@@ -1137,7 +1137,7 @@ function batchView() {
           <span>to</span><span><span class="mono wrap">${r.tx.to}</span>${copyButton(r.tx.to)}</span>
           <span>value</span><span class="mono">${r.tx.value}</span>
           <span>operation</span><span>${r.tx.operation === 1 ? 'DELEGATECALL (1)' : 'CALL (0)'}</span>
-          <span>data</span><span class="mono wrap">${r.tx.data} <a href=${`https://safe.swiss-knife.xyz/calldata-decoder?calldata=${encodeURIComponent(r.tx.data)}`} target="_blank" rel="noopener noreferrer" title="Decode in Swiss Knife" aria-label="Decode in Swiss Knife">↗</a></span>
+          <span>data</span><span class="mono wrap">${r.tx.data} <a href=${`https://www.anticapture.com/tools/decoder?calldata=${encodeURIComponent(r.tx.data)}`} target="_blank" rel="noopener noreferrer" title="Decode in Anticapture" aria-label="Decode in Anticapture">↗</a></span>
           <span>gas and refund</span><span class="mono">all zero</span>
           <span>safeTxHash</span><span class="mono wrap">${r.hash}</span>
           <span>domain hash</span><span class="mono wrap">${domainHash(r.tx)}</span>
@@ -1175,12 +1175,17 @@ const checkRpc = (url: string, id: number) => tryUrl(url, { method: 'POST', head
 const checkService = (url: string) => tryUrl(`${url}/api/v1/about/`, {}, j => (j?.name === 'Safe Transaction Service' ? undefined : 'Not a Safe Transaction Service'))
 
 const checking = new Set<Promise<unknown>>()
-/** Saves an override once it works from here; an empty field goes back to the default. */
+/** The endpoint a chain uses unless overridden: its first public RPC, or its Safe service. */
+const defaultEndpoint = (kind: Endpoint, id: number) => { const c = CHAINS.find(c => c.id === id); return kind === 'rpc' ? c?.rpcs[0] : c?.service?.url }
+/** Saves an override once it works from here; an empty field, or the default typed back in, goes back to the default. */
 async function saveEndpoint(kind: Endpoint, id: number, text: string) {
   const key = `${kind}:${id}`, url = kind === 'service' ? text.trim().replace(/\/+$/, '').replace(/\/api$/, '') : text.trim()
   const done = (edit?: Edit) => { if (edit) S.edits[key] = edit; else delete S.edits[key]; update() }
-  if (url === (S.settings[kind][id] ?? '')) return done()
-  if (!url) { delete S.settings[kind][id]; applySettings(); S.settingsChanged = true; return done() }
+  if (!url || url === defaultEndpoint(kind, id)) {
+    if (S.settings[kind][id] !== undefined) { delete S.settings[kind][id]; applySettings(); S.settingsChanged = true }
+    return done()
+  }
+  if (url === S.settings[kind][id]) return done()
   done({ text, state: 'checking' })
   const check = kind === 'rpc' ? checkRpc(url, id) : checkService(url)
   checking.add(check)
@@ -1217,17 +1222,16 @@ function settingsClosed() {
   S.settingsChanged = false; update()
 }
 
-function endpointField(kind: Endpoint, id: number, defaults: string[]) {
-  const e = S.edits[`${kind}:${id}`], saved = S.settings[kind][id]
-  const host = (u: string) => { try { return new URL(u).host } catch { return u } }
-  const about = defaults.length ? `${saved ? 'Replaces' : 'Default:'} ${defaults.map(host).join(' · ')}` : ''
+/** The URL in use, as plain text: the override if there is one, else the default. A line below only while it matters. */
+function endpointField(kind: Endpoint, id: number) {
+  const e = S.edits[`${kind}:${id}`], value = S.settings[kind][id] ?? defaultEndpoint(kind, id) ?? ''
   return html`<label class="endpoint">
     <span class="small muted">${kind === 'rpc' ? 'RPC' : 'Safe Transaction Service'}</span>
-    <input class="mono small" spellcheck="false" autocomplete="off" placeholder=${defaults[0] ?? (kind === 'rpc' ? 'https://…' : 'None')}
-      .value=${live(e?.text ?? saved ?? '')} @change=${(ev: any) => saveEndpoint(kind, id, ev.target.value)}>
+    <input class="mono small" spellcheck="false" autocomplete="off" placeholder=${kind === 'rpc' ? 'https://…' : 'None'}
+      .value=${live(e?.text ?? value)} @change=${(ev: any) => saveEndpoint(kind, id, ev.target.value)}>
     ${e?.state === 'checking' ? html`<span class="small muted">Checking…</span>`
     : e?.state === 'bad' ? html`<span class="small bad">${e.note}</span>`
-    : html`<span class="small muted">${e?.state === 'saved' ? html`<span class="good">Saved.</span> ` : nothing}${about}</span>`}
+    : e?.state === 'saved' ? html`<span class="small good">Saved</span>` : nothing}
   </label>`
 }
 
@@ -1249,8 +1253,8 @@ function settingsView() {
       <td><button class="ghost disclose" aria-expanded=${open} aria-label=${`Settings for ${name}`} @click=${(e: Event) => { e.stopPropagation(); toggle() }}>${open ? '▾' : '▸'}</button></td>
     </tr>
     ${open ? html`<tr class="details"><td colspan="4">
-      ${endpointField('rpc', id, c?.rpcs ?? [])}
-      ${endpointField('service', id, c?.service ? [c.service.url] : [])}
+      ${endpointField('rpc', id)}
+      ${endpointField('service', id)}
       ${custom(id) ? html`<button class="ghost" @click=${() => resetChain(id)}>${c ? 'Reset to default' : 'Remove'}</button>` : nothing}
     </td></tr>` : nothing}`
   }
