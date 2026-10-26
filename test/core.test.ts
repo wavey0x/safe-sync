@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { getAddress, hashTypedData, type Address, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import {
-  batchId, buildCalls, decodeBatch, describe, encodeBatch, linesFromTx, linesFromTxBuilder, normalizeSig, packMultiSend, packSigs,
+  applyOps, batchId, buildCalls, ownerOps, decodeBatch, describe, encodeBatch, linesFromTx, linesFromTxBuilder, normalizeSig, packMultiSend, packSigs,
   parseActions, parseTargets, payloadKey, safeTxHash, sigOwner, unpackMultiSend, walletTypedData, type Tx,
 } from '../src/safe'
 
@@ -172,4 +172,17 @@ test('a stored target stays put after partial execution: no duplicates, no doubl
   expect(buildCalls([sync], a, { version: '1.3.0', owners: [d, c, a, b], threshold: 2, nonce: 1 }, {}).calls).toHaveLength(0)
   // Half done by hand: only the missing owner.
   expect(buildCalls([sync], a, { version: '1.3.0', owners: [c, a, b], threshold: 2, nonce: 1 }, {}).owners).toEqual([d, c, a, b])
+})
+
+test('owner operations are read back and applied in their order: add C, then replace C with D, ends with D', () => {
+  const [a, b, c, d] = ['0xa', '0xb', '0xc', '0xd'].map(v => getAddress(v.padEnd(42, '1')))
+  const actions = parseActions(`add ${c}\nswap ${c} ${d}`).actions
+  const built = buildCalls(actions, ORIGINAL, { version: '1.3.0', owners: [a, b], threshold: 2, nonce: 0 }, {})
+  const tx: Tx = { chainId: 1, safe: ORIGINAL, nonce: 0, to: '0x40A2aCCbd92BCA938b02010E17A5b8929b49130D', value: '0', data: packMultiSend(built.calls), operation: 1 }
+  const ops = ownerOps(tx)!
+  expect(ops.map(o => o.kind)).toEqual(['add', 'swap'])
+  const after = applyOps([a, b], 2, ops)
+  expect(after.owners).toEqual([d, a, b].map(x => x.toLowerCase()))
+  expect(after.owners).toEqual(built.owners.map(x => x.toLowerCase())) // what the Safe ends up with
+  expect(ownerOps({ ...tx, data: packMultiSend([...built.calls, { to: a, value: 0n, data: '0x' }]) })).toBeNull()
 })

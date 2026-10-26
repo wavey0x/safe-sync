@@ -37,6 +37,7 @@ button:hover:not(:disabled), .button:hover { border-color: var(--accent); }
 button:disabled { opacity: .45; cursor: default; }
 .primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .ghost { border-color: transparent; background: transparent; color: var(--muted); }
+.bad-btn { border-color: var(--bad); color: var(--bad); }
 .errors { color: var(--bad); display: grid; gap: 2px; }
 .notice { color: var(--warn); }
 .summary { font-size: 15px; font-weight: 600; }

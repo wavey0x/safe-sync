@@ -554,6 +554,39 @@ export function describe(tx: Pick<Tx, 'to' | 'value' | 'data' | 'operation' | 's
   return [step(tx.to, BigInt(tx.value), tx.data, tx.operation)]
 }
 
+export type OwnerOp =
+  | { kind: 'swap'; old: string; new: string }
+  | { kind: 'add'; owner: string; threshold: number }
+  | { kind: 'remove'; owner: string; threshold: number }
+  | { kind: 'threshold'; n: number }
+
+/** The owner operations a transaction makes on its own Safe, in order, read from the calldata; null if it does anything else. */
+export function ownerOps(tx: Pick<Tx, 'to' | 'value' | 'data' | 'operation' | 'safe'>): OwnerOp[] | null {
+  const ops: OwnerOp[] = []
+  for (const st of describe(tx)) {
+    if (st.target !== 'self' || st.op !== 0) return null
+    const a = Object.fromEntries(st.args)
+    if (st.fn === 'swapOwner') ops.push({ kind: 'swap', old: a.oldOwner, new: a.newOwner })
+    else if (st.fn === 'addOwnerWithThreshold') ops.push({ kind: 'add', owner: a.owner, threshold: Number(a._threshold) })
+    else if (st.fn === 'removeOwner') ops.push({ kind: 'remove', owner: a.owner, threshold: Number(a._threshold) })
+    else if (st.fn === 'changeThreshold') ops.push({ kind: 'threshold', n: Number(a._threshold) })
+    else return null
+  }
+  return ops
+}
+
+/** Owners (lowercase, in Safe order) and threshold after the operations, applied in order exactly as the Safe applies them. */
+export function applyOps(owners: string[], threshold: number, ops: OwnerOp[]) {
+  let o = owners.map(x => x.toLowerCase()), t = threshold
+  for (const op of ops) {
+    if (op.kind === 'swap') o = o.map(x => (x === op.old.toLowerCase() ? op.new.toLowerCase() : x))
+    else if (op.kind === 'add') o = [op.owner.toLowerCase(), ...o], t = op.threshold
+    else if (op.kind === 'remove') o = o.filter(x => x !== op.owner.toLowerCase()), t = op.threshold
+    else t = op.n
+  }
+  return { owners: o, threshold: t }
+}
+
 /** Grouping key: identical payloads up to the Safe's own address. */
 export const payloadKey = (tx: Tx) => JSON.stringify([same(tx.to, tx.safe) ? 'self' : tx.to.toLowerCase(), tx.value, withSelf(tx.data, tx.safe).toLowerCase(), tx.operation])
 

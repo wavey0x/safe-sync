@@ -5,10 +5,10 @@ import { live } from 'lit-html/directives/live.js'
 import { getAddress, isAddress, toHex, type Address, type Hex } from 'viem'
 import { CHAINS } from './chains'
 import {
-  batchId, chainName, chainOf, client, config, decodeBatch, describe, domainHash, encodeBatch, execData, findSafe, linesFromTx,
+  applyOps, batchId, chainName, chainOf, client, config, decodeBatch, describe, domainHash, encodeBatch, execData, findSafe, linesFromTx,
   linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, payloadKey, prepareTarget, readSafe, resolveNames,
-  revertData, revertReason, SAFE_ABI, safeTxHash, short, sigOwner, walletTypedData,
-  type Action, type Batch, type Found, type Prepared, type Step, type Tx,
+  ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, short, sigOwner, walletTypedData,
+  type Action, type Batch, type Found, type OwnerOp, type Prepared, type Step, type Tx,
 } from './safe'
 import * as svc from './service'
 
@@ -61,7 +61,7 @@ const S = {
   preparing: false, prepared: [] as Prepared[], errors: [] as string[], names: {} as Record<string, Address>, link: '',
   batch: null as Batch | null, id: '', rows: [] as Row[], loadError: '', pasted: '',
   wallets: [] as Wallet[], provider: null as any, account: null as Address | null, choosing: false,
-  signing: false, executing: false, waiting: false, current: null as Row | null, notice: '', copied: false,
+  signing: false, executing: false, waiting: false, current: null as Row | null, notice: '', copied: '' as '' | 'yes' | 'failed',
   settingsOpen: false, settingsErrors: [] as string[], settings: store.get('safesync:settings', { rpc: '', service: '', apiKey: '' }),
 }
 
@@ -267,9 +267,15 @@ async function copyLink() {
     const title = titleFor(ready.map(p => ({ tx: p.tx!, owners: p.state?.owners, threshold: p.state?.threshold })))
     S.link = `${location.href.split('#')[0]}#${await encodeBatch({ title, created: Date.now(), txs: ready.map(p => p.tx!), labels, src: S.d })}`
   }
-  await navigator.clipboard?.writeText(S.link).catch(() => {})
-  S.copied = true; update()
-  setTimeout(() => { S.copied = false; update() }, 2000)
+  try {
+    await navigator.clipboard.writeText(S.link)
+    S.copied = 'yes'
+  } catch {
+    S.copied = 'failed'
+    setTimeout(() => { const el = document.querySelector<HTMLInputElement>('input[aria-label="Signing link"]'); el?.focus(); el?.select() })
+  }
+  update()
+  setTimeout(() => { S.copied = ''; update() }, 2500)
 }
 
 // ---------------------------------------------------------------- batch
@@ -520,8 +526,10 @@ function edit() {
 // ---------------------------------------------------------------- view helpers
 
 function copy(text: string) {
-  navigator.clipboard?.writeText(text).then(() => { S.notice = 'Copied.'; update(); setTimeout(() => { if (S.notice === 'Copied.') S.notice = '', update() }, 1500) }, () => {})
-  update()
+  Promise.resolve().then(() => navigator.clipboard.writeText(text)).then(
+    () => { S.notice = 'Copied.'; update(); setTimeout(() => { if (S.notice === 'Copied.') S.notice = '', update() }, 1500) },
+    () => { S.notice = "Couldn't copy: clipboard access was blocked"; update() },
+  )
 }
 const addr = (a: string, labels: Record<string, string> = S.batch?.labels ?? {}) =>
   html`<span class="mono" title=${a}>${short(a)}</span>${labels[a.toLowerCase()] ? html` <span class="label">${labels[a.toLowerCase()]}</span>` : nothing}`
@@ -592,51 +600,35 @@ function changeView(txs: Tx[], result: (tx: Tx) => Result | undefined, labels: R
   })
 }
 
-type OwnerChange = { swaps: [string, string][]; adds: string[]; removes: string[]; threshold?: number }
-/** The owner operations a transaction makes, or null if it does anything else. Read from the calldata, not the draft. */
-function ownerChange(tx: Tx): OwnerChange | null {
-  const c: OwnerChange = { swaps: [], adds: [], removes: [] }
-  for (const st of describe(tx)) {
-    const a = Object.fromEntries(st.args)
-    if (st.target !== 'self' || st.op !== 0) return null
-    if (st.fn === 'swapOwner') c.swaps.push([a.oldOwner, a.newOwner])
-    else if (st.fn === 'addOwnerWithThreshold') c.adds.push(a.owner), (c.threshold = Number(a._threshold))
-    else if (st.fn === 'removeOwner') c.removes.push(a.owner), (c.threshold = Number(a._threshold))
-    else if (st.fn === 'changeThreshold') c.threshold = Number(a._threshold)
-    else return null
-  }
-  return c
-}
-function applyChange(owners: string[], threshold: number, c: OwnerChange) {
-  let o = owners.map(x => x.toLowerCase())
-  for (const [a, b] of c.swaps) o = o.map(x => (x === a.toLowerCase() ? b.toLowerCase() : x))
-  o = [...c.adds.map(x => x.toLowerCase()), ...o].filter(x => !c.removes.some(r => r.toLowerCase() === x))
-  return { owners: o, threshold: c.threshold ?? threshold }
-}
 /** "replace 2 owners, threshold 5 → 4": what one Safe's transaction does. */
-function changeText(c: OwnerChange, before?: number) {
-  const parts = [c.swaps.length && `replace ${plural(c.swaps.length, 'owner')}`, c.adds.length && `add ${plural(c.adds.length, 'owner')}`, c.removes.length && `remove ${plural(c.removes.length, 'owner')}`].filter(Boolean) as string[]
-  if (c.threshold !== undefined && before !== undefined && c.threshold !== before) parts.push(`threshold ${before} → ${c.threshold}`)
+function changeText(ops: OwnerOp[], before?: number) {
+  const n = (k: OwnerOp['kind']) => ops.filter(op => op.kind === k).length
+  const parts = [n('swap') && `replace ${plural(n('swap'), 'owner')}`, n('add') && `add ${plural(n('add'), 'owner')}`, n('remove') && `remove ${plural(n('remove'), 'owner')}`].filter(Boolean) as string[]
+  const after = before === undefined ? undefined : applyOps([], before, ops).threshold
+  if (after !== undefined && after !== before) parts.push(`threshold ${before} → ${after}`)
   return parts.join(', ')
 }
 const mostCommon = (xs: string[]) => [...xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map<string, number>())].sort((a, b) => b[1] - a[1])[0]?.[0]
 
-type Item = { tx: Tx; owners?: Address[]; threshold?: number; done?: boolean } // done: already executed, so owners are already the result
+// done: already executed, so the owners read are already the result. failed: its state couldn't be read.
+type Item = { tx: Tx; owners?: Address[]; threshold?: number; done?: boolean; failed?: boolean }
 /**
  * For owner changes, the review leads with the configuration every Safe ends up with; what differs per Safe goes on its row.
  * Anything else falls back to the step-by-step summary.
  */
 function reviewView(items: Item[], labels: Record<string, string>) {
-  const known = items.filter(i => i.owners && i.threshold !== undefined)
-  const changes = items.map(i => ownerChange(i.tx))
+  const ops = items.map(i => ownerOps(i.tx))
   const generic = () => changeView(items.map(i => i.tx), tx => {
-    const i = items.find(x => x.tx === tx)!, c = ownerChange(tx)
-    if (!i.owners || i.threshold === undefined || i.done || !c) return undefined
-    const a = applyChange(i.owners, i.threshold, c)
+    const i = items.find(x => x.tx === tx)!, o = ownerOps(tx)
+    if (!i.owners || i.threshold === undefined || i.done || !o) return undefined
+    const a = applyOps(i.owners, i.threshold, o)
     return { before: [i.threshold, i.owners.length], after: [a.threshold, a.owners.length] }
   }, labels)
-  if (!known.length || changes.some(c => !c)) return generic()
-  const after = known.map(i => (i.done ? { owners: i.owners!.map(o => o.toLowerCase()), threshold: i.threshold! } : applyChange(i.owners!, i.threshold!, ownerChange(i.tx)!)))
+  if (ops.some(o => !o) || items.some(i => i.failed)) return generic()
+  // "On all Safes" is only claimed once every Safe's current owners are known.
+  if (items.some(i => !i.owners || i.threshold === undefined)) return html`<div class="change"><div class="muted small">Reading every Safe…</div></div>`
+  const known = items
+  const after = known.map((i, k) => (i.done ? { owners: i.owners!.map(o => o.toLowerCase()), threshold: i.threshold! } : applyOps(i.owners!, i.threshold!, ops[k]!)))
   const sig = (a: { owners: string[]; threshold: number }) => `${[...a.owners].sort().join()}|${a.threshold}`
   if (new Set(after.map(sig)).size !== 1) return generic()
   const final = after[0], first = known.find(i => !i.done) ?? known[0], before = first.owners!.map(o => o.toLowerCase())
@@ -660,7 +652,7 @@ function reviewView(items: Item[], labels: Record<string, string>) {
 
 /** Per-Safe exceptions: a row only says what it changes when that differs from what most Safes change. */
 function exceptions(items: Item[]) {
-  const texts = items.map(i => { const c = ownerChange(i.tx); return c ? changeText(c, i.threshold) : '' })
+  const texts = items.map(i => { const o = ownerOps(i.tx); return o ? changeText(o, i.threshold) : '' })
   const common = mostCommon(texts)
   return (i: number) => (texts[i] && texts[i] !== common ? texts[i] : '')
 }
@@ -669,9 +661,9 @@ function exceptions(items: Item[]) {
 
 /** "Replace 2 owners on 15 Safes": the batch's title, from what every Safe's transaction does. */
 function titleFor(items: Item[]): string {
-  const changes = items.map(i => ownerChange(i.tx))
+  const changes = items.map(i => ownerOps(i.tx))
   if (changes.every(Boolean)) {
-    const texts = new Set(changes.map((c, i) => changeText(c!, items[i].threshold)))
+    const texts = new Set(changes.map((o, i) => changeText(o!, items[i].threshold)))
     const t = texts.size === 1 ? [...texts][0] || 'update owners' : 'update owners'
     return `${t[0].toUpperCase()}${t.slice(1)} on ${plural(items.length, 'Safe')}`
   }
@@ -787,7 +779,7 @@ function composeView() {
     <div class="row">
       <span class="grow"></span>
       ${S.link ? html`<a class="button" href=${S.link}>Sign now</a>` : nothing}
-      <button class="primary" @click=${copyLink} ?disabled=${S.preparing || !ready.length}>${S.copied ? 'Copied ✓' : 'Copy signing link'}</button>
+      <button class=${S.copied === 'failed' ? 'bad-btn' : 'primary'} @click=${copyLink} ?disabled=${S.preparing || !ready.length}>${S.copied === 'yes' ? 'Copied ✓' : S.copied === 'failed' ? 'Copy failed' : 'Copy signing link'}</button>
     </div>
     ${S.link ? html`<input readonly class="mono small" aria-label="Signing link" .value=${live(S.link)} @focus=${(e: any) => e.target.select()}>` : nothing}
   </section>` : nothing}`
@@ -856,7 +848,7 @@ function progressView() {
 function batchView() {
   if (S.loadError) return html`<section class="card"><div class="errors">${S.loadError}</div><button @click=${() => { location.hash = ''; S.mode = 'compose'; update() }}>New batch</button></section>`
   const b = S.batch!
-  const items: Item[] = S.rows.map(r => ({ tx: r.tx, owners: r.owners, threshold: r.threshold, done: status(r).kind === 'executed' }))
+  const items: Item[] = S.rows.map(r => ({ tx: r.tx, owners: r.owners, threshold: r.threshold, done: status(r).kind === 'executed', failed: r.chainNonce === undefined && !!r.error }))
   const except = exceptions(items)
   const manual = S.rows.filter(r => r.svc === 'none' && needsWork(r))
   const toShare = S.rows.reduce((n, r) => n + unshared(r).length, 0)
