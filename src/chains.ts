@@ -51,13 +51,13 @@ const rows: [number, string, string, string, string[], string, boolean | [string
   [1313161554, "Aurora Mainnet", "aurora", "ETH", ["https://mainnet.aurora.dev","https://1313161554.rpc.thirdweb.com"], "https://explorer.aurora.dev", true],
   [252, "Fraxtal", "frax", "FRAX", ["https://fraxtal.api.pocket.network","https://frax-mainnet.rpc.sentio.xyz"], "https://fraxscan.com", ["https://safe.mainnet.frax.com/txs","https://safe.mainnet.frax.com","fraxtal"]],
   [167000, "Taiko", "taiko", "ETH", ["https://rpc.ankr.com/taiko","https://taiko.api.pocket.network"], "https://taikoscan.io", ["https://transaction-taiko.safe.protofire.io","https://app.safe.protofire.io","tko-mainnet"]],
-  [42793, "Etherlink Mainnet", "etlk", "XTZ", ["https://rpc.ankr.com/etherlink_mainnet","https://node.mainnet.etherlink.com"], "https://explorer.etherlink.com", false],
-  [2222, "Kava", "kava", "KAVA", ["https://kava-evm-rpc.publicnode.com","https://kava.api.pocket.network"], "https://kavascan.com", false],
-  [239, "TAC Mainnet", "tacchain", "TAC", ["https://rpc.ankr.com/tac","https://rpc.tac.build"], "https://explorer.tac.build", false],
+  [42793, "Etherlink Mainnet", "etlk", "XTZ", ["https://rpc.ankr.com/etherlink_mainnet","https://node.mainnet.etherlink.com"], "https://explorer.etherlink.com", ["https://transaction.safe.etherlink.com","https://safe.etherlink.com","etlk"]],
+  [2222, "Kava", "kava", "KAVA", ["https://kava-evm-rpc.publicnode.com","https://kava.api.pocket.network"], "https://kavascan.com", ["https://transaction.safe.kava.io","https://safe.kava.io","kava"]],
+  [239, "TAC Mainnet", "tacchain", "TAC", ["https://rpc.ankr.com/tac","https://rpc.tac.build"], "https://explorer.tac.build", ["https://transaction.safe.tac.build","https://safe.tac.build","tac"]],
   [81457, "Blast", "blast", "ETH", ["https://blast-rpc.publicnode.com","https://blast.api.pocket.network"], "https://blastscan.io", false],
   [34443, "Mode", "mode", "ETH", ["https://rpc.nodeflare.app/mode/public","https://mode-mainnet.rpc.sentio.xyz"], "https://explorer.mode.network", false],
   [7777777, "Zora", "zora", "ETH", ["https://rpc.zora.energy","https://7777777.rpc.thirdweb.com"], "https://explorer.zora.energy", false],
-  [250, "Fantom Opera", "ftm", "FTM", ["https://fantom.api.pocket.network","https://api.zan.top/ftm-mainnet"], "https://ftmscan.com", false],
+  [250, "Fantom Opera", "ftm", "FTM", ["https://fantom.api.pocket.network","https://api.zan.top/ftm-mainnet"], "https://ftmscan.com", ["https://safe-txservice.fantom.network","https://safe.fantom.network","ftm"]],
   [1088, "Metis Andromeda Mainnet", "metis", "METIS", ["https://metis-rpc.publicnode.com","https://andromeda.metis.io/?owner=1088"], "https://andromeda-explorer.metis.io", false],
   [1284, "Moonbeam", "mbeam", "GLMR", ["https://moonbeam.api.pocket.network","https://moonbeam.api.onfinality.io/public"], "https://moonbeam.subscan.io", false],
   [1329, "Sei Network", "sei", "SEI", ["https://sei-evm-rpc.stakeme.pro","https://sei.api.pocket.network"], "https://seiscan.io", false],
@@ -68,7 +68,7 @@ const rows: [number, string, string, string, string[], string, boolean | [string
   [60808, "BOB", "bob", "ETH", ["https://bob.rpc.sentio.xyz","https://rpc.gobob.xyz"], "https://explorer.gobob.xyz", false],
   [25, "Cronos Mainnet", "cro", "CRO", ["https://cronos-evm-rpc.publicnode.com","https://cronos.rpc.sentio.xyz"], "https://explorer.cronos.org", false],
   [33139, "ApeChain", "apechain", "APE", ["https://rpc.apechain.com","https://33139.rpc.thirdweb.com"], "https://apescan.io", false],
-  [98866, "Plume Mainnet", "plume", "PLUME", ["https://rpc.plume.org","https://98866.rpc.thirdweb.com"], "https://explorer.plume.org", false],
+  [98866, "Plume Mainnet", "plume", "PLUME", ["https://rpc.plume.org","https://98866.rpc.thirdweb.com"], "https://explorer.plume.org", ["https://safe-transaction-plume.onchainden.com","https://safe.onchainden.com","plume"]],
 ]
 
 const service = (short: string, s: boolean | [string, string, string]): SafeService | undefined =>

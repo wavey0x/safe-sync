@@ -17,7 +17,12 @@ const SERVICE: Record<number, string> = {
 // Services someone else runs with the same API (found through each app's gateway /v1/chains/<id>):
 // [service, Safe{Wallet} app, the app's chain prefix in links].
 const COMMUNITY: Record<number, [string, string, string]> = {
+  239: ['https://transaction.safe.tac.build', 'https://safe.tac.build', 'tac'], // TAC
+  250: ['https://safe-txservice.fantom.network', 'https://safe.fantom.network', 'ftm'], // Fantom
   252: ['https://safe.mainnet.frax.com/txs', 'https://safe.mainnet.frax.com', 'fraxtal'], // Frax
+  2222: ['https://transaction.safe.kava.io', 'https://safe.kava.io', 'kava'], // Kava
+  42793: ['https://transaction.safe.etherlink.com', 'https://safe.etherlink.com', 'etlk'], // Etherlink
+  98866: ['https://safe-transaction-plume.onchainden.com', 'https://safe.onchainden.com', 'plume'], // Den
   167000: ['https://transaction-taiko.safe.protofire.io', 'https://app.safe.protofire.io', 'tko-mainnet'], // Protofire
 }
 // Popular chains without an official service (a community one above, or signatures travel as a pasted bundle).

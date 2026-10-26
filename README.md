@@ -91,7 +91,7 @@ as executed.
 | Concern | Where it lives |
 |---|---|
 | What to sign | The link fragment: compressed JSON that stores each distinct payload once, with the Safe's own address as `{self}`. 27 Safes fit in about 1 KB, and the fragment is never sent to a server. |
-| Signatures | Safe Transaction Service, posted straight from the browser, so they also show in Safe{Wallet}. The first signature on a transaction creates the proposal. Safe runs the service on most chains; on Fraxtal it's Frax's (`safe.mainnet.frax.com`), on Taiko Protofire's (`app.safe.protofire.io`), and links open in those apps. Override any in Settings. On a chain without a service, signatures travel by hand: once you've signed, *Copy signatures* appears, and the executor pastes them in that chain's row. |
+| Signatures | Safe Transaction Service, posted straight from the browser, so they also show in Safe{Wallet}. The first signature on a transaction creates the proposal. Safe runs the service on most chains; Fraxtal, Taiko, Etherlink, Kava, TAC, Fantom and Plume use their own or community-run services, and links open in the corresponding wallet app. Override any in Settings. On a chain without a service, signatures travel by hand: once you've signed, *Copy signatures* appears, and the executor pastes them in that chain's row. |
 | Owners, threshold, nonce, executed? | The chain, through public RPCs (two per chain with failover; override them in Settings). The service returns trusted transactions at this nonce; if ours is absent or unsigned, it is looked up by hash. Queue reads include every page. |
 | Resume / retry | localStorage, keyed by safeTxHash. Every open re-reads the service and re-uploads anything it lacks. Signatures survive editing a batch into a new link. |
 
