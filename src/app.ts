@@ -1104,7 +1104,7 @@ function batchView() {
   return html`
   <section class="card">
     <div class="row">
-      <h2 class="grow">${b.title}</h2>
+      <span class="grow muted">${b.title}</span>
       <span class="fingerprint" tabindex="0" data-tip="Fingerprint of every transaction in this link. Confirm it with whoever sent it.">${S.id}</span>
       <button class="ghost" @click=${edit}>Edit</button>
     </div>

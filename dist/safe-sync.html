@@ -391,7 +391,7 @@ threshold ${o[2]}`;if(n==="changeThreshold")return`threshold ${o[0]}`}catch{}ret
   ${p.notice?A`<div class="notice">${p.notice}</div>`:R}`}function e2(){if(p.loadError)return A`<section class="card"><div class="errors">${p.loadError}</div><button @click=${()=>{location.hash="",p.mode="compose",U()}}>New batch</button></section>`;let e=p.batch,t=p.rows.map((s)=>({tx:s.tx,owners:s.owners,threshold:s.threshold,done:vr(s).kind==="executed",failed:s.chainNonce===void 0&&!!s.error})),r=Jx(t),n=p.rows.filter((s)=>s.svc==="none"&&Ln(s)),o=p.rows.reduce((s,i)=>s+Kd(i).length,0);return A`
   <section class="card">
     <div class="row">
-      <h2 class="grow">${e.title}</h2>
+      <span class="grow muted">${e.title}</span>
       <span class="fingerprint" tabindex="0" data-tip="Fingerprint of every transaction in this link. Confirm it with whoever sent it.">${p.id}</span>
       <button class="ghost" @click=${Rw}>Edit</button>
     </div>
