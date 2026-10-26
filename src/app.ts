@@ -1084,7 +1084,7 @@ function sigCount(r: Row, st: ReturnType<typeof status>) {
   const cls = n === 0 && r.proposed ? 'count proposed' : 'count', style = `--t: ${t}`
   const body = html`${st.text}<span class="dashes" aria-hidden="true">${Array.from({ length: t }, (_, i) => html`<i class=${i < n ? 'on' : ''}></i>`)}</span>`
   return queue
-    ? html`<a class=${cls} style=${style} href=${queue} target="_blank" rel="noopener" data-tip=${`${st.detail}. Opens the queue.`} @click=${(e: Event) => e.stopPropagation()}>${body}</a>`
+    ? html`<a class=${cls} style=${style} href=${queue} target="_blank" rel="noopener" data-tip=${st.detail ?? nothing} @click=${(e: Event) => e.stopPropagation()}>${body}</a>`
     : html`<span class=${cls} style=${style} data-tip=${st.detail ?? nothing}>${body}</span>`
 }
 
