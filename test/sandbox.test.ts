@@ -161,7 +161,7 @@ test.skipIf(!enabled)('a proposer (delegate) proposes in its delegator\'s name, 
   const res = await post(8453, path, await proposal(tx, PROPOSER.address, both))
   expect([res.status, await res.text()]).toEqual([422, JSON.stringify({ nonFieldErrors: ['Just one signature is expected if using delegates'] })])
 
-  await svc.propose(tx, hash, PROPOSER.address, await sign(tx, PROPOSER), OWNERS[0].address)
+  await svc.propose(tx, hash, PROPOSER.address, await sign(tx, PROPOSER))
   const t = (await svc.getTx(8453, hash))!
   expect([t.proposedByDelegate, t.confirmations]).toEqual([PROPOSER.address, []])
   // Signed, so trusted: Safe{Wallet}'s queue (and ours) lists it.
@@ -186,18 +186,18 @@ test.skipIf(!enabled)('a proposer (delegate) proposes in its delegator\'s name, 
   } finally { sb.service.delegates.splice(-rows.length) }
 }, 60_000)
 
-test.skipIf(!enabled)('anyone else proposes unsigned, naming an owner: untrusted until an owner confirms', async () => {
+// The app no longer proposes unsigned, but anyone can: the service keeps such proposals untrusted, and so must we.
+test.skipIf(!enabled)('an unsigned proposal naming an owner stays untrusted until an owner confirms', async () => {
   const tx: Tx = { chainId: 252, safe: sb.team, nonce: 1000, to: sb.team, value: '0', data: encodeFunctionData({ abi: parseAbi(['function changeThreshold(uint256)']), functionName: 'changeThreshold', args: [3n] }), operation: 0 }
   const hash = safeTxHash(tx), outsider = ACCOUNTS[0].address
   // The service still takes a proposal without a signature, but only from an owner (or delegate) as sender.
   const res = await post(252, `/v2/safes/${tx.safe}/multisig-transactions/`, await proposal(tx, outsider, null))
   expect([res.status, await res.text()]).toEqual([422, expect.stringContaining(`Sender=${outsider} is not an owner or delegate`)])
 
-  await svc.propose(tx, hash, outsider, null, OWNERS[1].address)
+  expect((await post(252, `/v2/safes/${tx.safe}/multisig-transactions/`, await proposal(tx, OWNERS[1].address, null))).status).toBe(201)
   const t = (await svc.getTx(252, hash))!
   expect([t.trusted, t.confirmations, t.proposedByDelegate]).toEqual([false, [], null])
-  expect(JSON.parse((t as any).origin)).toEqual({ name: 'Safe Sync', note: `unsigned, sent by ${outsider}` })
-  // Out of the trusted listings; the link page can still retrieve its own unsigned proposal by hash.
+  // Out of the trusted listings; the link page can still retrieve it by hash.
   expect(await svc.queued(252, sb.team, 1000)).toEqual([])
   expect(await svc.atNonce(252, sb.team, 1000)).toEqual([])
   // The first owner's signature confirms it and makes it trusted.
@@ -217,7 +217,7 @@ test.skipIf(!enabled)('unsigned proposals cannot hide a signed transaction at th
   for (let n = 4; n < 24; n++) {
     const noise = { ...tx, data: encodeFunctionData({ abi: parseAbi(['function changeThreshold(uint256)']), functionName: 'changeThreshold', args: [BigInt(n)] }) }
     unsignedHash = safeTxHash(noise)
-    await svc.propose(noise, unsignedHash, ACCOUNTS[0].address, null, owner.address)
+    expect((await post(chainId, `/v2/safes/${noise.safe}/multisig-transactions/`, await proposal(noise, owner.address, null))).status).toBe(201)
   }
   expect((await svc.atNonce(chainId, sb.team, nonce)).map(t => t.safeTxHash)).toEqual([hash])
   expect((await svc.getTx(chainId, hash))!.confirmations.map(c => c.owner)).toEqual([owner.address])

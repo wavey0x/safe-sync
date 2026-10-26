@@ -87,10 +87,10 @@ export async function queued(chainId: number, safe: Address, nonce: number): Pro
     .map(t => ({ nonce: Number(t.nonce), safeTxHash: t.safeTxHash }))
 }
 
-const proposal = (tx: Tx, hash: Hex, sender: Address, signature: Hex | null, origin: Record<string, string> = {}) => api(tx.chainId, `/v2/safes/${tx.safe}/multisig-transactions/`, {
+const proposal = (tx: Tx, hash: Hex, sender: Address, signature: Hex) => api(tx.chainId, `/v2/safes/${tx.safe}/multisig-transactions/`, {
   to: tx.to, value: tx.value, data: tx.data === '0x' ? null : tx.data, operation: tx.operation,
   safeTxGas: '0', baseGas: '0', gasPrice: '0', gasToken: ZERO, refundReceiver: ZERO, nonce: String(tx.nonce),
-  contractTransactionHash: hash, sender, signature, origin: JSON.stringify({ name: 'Safe Sync', ...origin }),
+  contractTransactionHash: hash, sender, signature, origin: JSON.stringify({ name: 'Safe Sync' }),
 })
 
 /** Posts one signature: proposes the transaction if nobody has yet, otherwise adds a confirmation. */
@@ -103,14 +103,9 @@ export async function submit(tx: Tx, hash: Hex, owner: Address, signature: Hex, 
   if (!res.ok) await fail(res)
 }
 
-/**
- * Proposes without being an owner. A proposer (a Safe{Wallet} delegate) signs: that makes the proposal trusted, but
- * isn't a confirmation. Anyone else sends no signature, which the service still allows if the sender is an owner: so
- * `owner` is named as sender, the origin says who really sent it, and the proposal stays untrusted (out of
- * Safe{Wallet}'s queue) until an owner confirms it.
- */
-export async function propose(tx: Tx, hash: Hex, from: Address, signature: Hex | null, owner: Address): Promise<void> {
-  const res = await (signature ? proposal(tx, hash, from, signature) : proposal(tx, hash, owner, null, { note: `unsigned, sent by ${from}` }))
+/** Proposes as a proposer (a Safe{Wallet} delegate): its signature makes the proposal trusted, but isn't a confirmation. */
+export async function propose(tx: Tx, hash: Hex, delegate: Address, signature: Hex): Promise<void> {
+  const res = await proposal(tx, hash, delegate, signature)
   if (!res.ok) await fail(res)
 }
 

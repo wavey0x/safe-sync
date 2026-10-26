@@ -243,7 +243,7 @@ Safe Sync sandbox: http://localhost:${server.port}
   Team Safe ${sb.team} (5-of-9) on every chain, original Safe ${sb.original} on Ethereum, Safe 1.4.1 ${sb.scroll141} on Scroll${signers.length ? `\n  Your signers are owners ${signers.map((a, i) => `${9 - signers.length + i + 1} (${a})`).join(', ')} on all of them, with 100 ETH on every local chain` : ''}
   Set up to include: different nonces, a rotation already applied on Linea, transactions already queued on Gnosis and Polygon,
   the same rotation already queued on the original Safe with one signature, and a proposer (Safe{Wallet}
-  delegate of owner 2) that proposes signed but never confirms. "Not an owner" proposes unsigned.
+  delegate of owner 2) that proposes signed but never confirms. "Not an owner" only views the link.
 
   The draft is filled in: Review → Copy signing link → Propose now.
   Choose who signs in the "Sandbox wallet" box at the bottom left. Other wallets are hidden here: these chains

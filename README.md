@@ -50,17 +50,19 @@ browser's Back and Forward move between them, and a reload stays on the step you
    results; any edit throws them away, so a link never carries stale transactions. *Edit* on a signing
    link reopens it at Build Txn.
 
-**Proposing**: whoever opens the link and connects can put each transaction in the Safe service, so
-it shows up in Safe{Wallet}. One button does what the account can:
+**Proposing**: connect a wallet (top right; the address there opens Copy and Disconnect) and one
+button does what the account can:
 
-- **An owner** signs (*Sign N*). The first signature on a transaction creates the proposal.
+- **An owner** signs (*Sign N*). The first signature on a transaction creates the proposal, so it
+  shows up in Safe{Wallet}.
 - **A proposer** (a delegate an owner added in Safe{Wallet}) signs to propose (*Propose N*). That
   makes the proposal trusted, so Safe{Wallet} lists it, but it isn't a confirmation.
-- **Anyone else** proposes unsigned, with no wallet prompt. The service still allows that, as long
-  as an owner is named as the sender, so the first owner is named and the proposal's origin records
-  who really sent it. An unsigned proposal stays out of Safe{Wallet}'s queue until an owner signs it
-  (a direct link to it works), and anyone could post one, so other unsigned proposals at the same nonce
-  don't count as competitors.
+- **Anyone else** views the link. (The Safe service accepts unsigned proposals, but keeps them out of
+  Safe{Wallet}'s queue and records an owner as their proposer, so Safe Sync doesn't make them. Anyone
+  could post one, so unsigned proposals at the same nonce don't count as competitors.)
+
+A ✓ appears once the Safe service lists your signature or proposal, not just when the upload was
+accepted.
 
 **Signers**: open the link, check the code next to the title with whoever sent it, connect, then click **Sign N**. The title says what the link does ("Swap 2 owners on 15 Safes").
 
@@ -87,7 +89,7 @@ as executed.
 | Concern | Where it lives |
 |---|---|
 | What to sign | The link fragment: compressed JSON that stores each distinct payload once, with the Safe's own address as `{self}`. 27 Safes fit in about 1 KB, and the fragment is never sent to a server. |
-| Signatures | Safe Transaction Service, posted straight from the browser, so they also show in Safe{Wallet}. The first signature on a transaction creates the proposal. Safe runs the service on most chains; on Fraxtal it's Frax's (`safe.mainnet.frax.com`), on Taiko Protofire's (`app.safe.protofire.io`), and links open in those apps. Override any in Settings. When a service can't be reached, signatures travel as a copy/paste bundle. |
+| Signatures | Safe Transaction Service, posted straight from the browser, so they also show in Safe{Wallet}. The first signature on a transaction creates the proposal. Safe runs the service on most chains; on Fraxtal it's Frax's (`safe.mainnet.frax.com`), on Taiko Protofire's (`app.safe.protofire.io`), and links open in those apps. Override any in Settings. On a chain without a service, signatures travel by hand: once you've signed, *Copy signatures* appears, and the executor pastes them in that chain's row. |
 | Owners, threshold, nonce, executed? | The chain, through public RPCs (two per chain with failover; override them in Settings). The service returns trusted transactions at this nonce; if ours is absent or unsigned, it is looked up by hash. Queue reads include every page. |
 | Resume / retry | localStorage, keyed by safeTxHash. Every open re-reads the service and re-uploads anything it lacks. Signatures survive editing a batch into a new link. |
 
@@ -118,8 +120,8 @@ bun run sandbox:simple                           # a 2-of-2 Safe on 3 local-only
   - A 5-of-9 team Safe everywhere, a reordered "original" Safe on Ethereum, and a 1.4.1 Safe on Scroll.
   - Mixed nonces, a rotation already done on Linea, other transactions already queued on Gnosis (one)
     and Polygon (two), and the same rotation already queued with one signature.
-  - A proposer (a delegate of owner 2) in the sandbox wallet, to try proposing signed; "Not an owner"
-    proposes unsigned.
+  - A proposer (a delegate of owner 2) in the sandbox wallet, to try proposing; "Not an owner" only views
+    the link.
   - Other wallets are hidden here: with real chain ids, a real wallet would send executions to the
     real networks.
 - **Simple sandbox:** chain ids 31338 to 31340 belong to no real network, so your wallet adds them as

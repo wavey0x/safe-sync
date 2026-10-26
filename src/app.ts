@@ -21,7 +21,7 @@ type Row = {
   owners?: Address[]; threshold?: number; chainNonce?: number
   svc: 'loading' | 'ok' | 'none' | 'error'; proposed: boolean; svcExecuted?: boolean; readAt: number
   trusted?: boolean // false: proposed unsigned, so out of Safe{Wallet}'s queue until an owner signs
-  proposer?: Address; proposing?: boolean // proposer: who proposed it when not an owner (a delegate, or someone unsigned from here)
+  proposer?: Address; proposing?: boolean // proposer: the delegate that proposed it, if one did
   others: { safeTxHash: Hex; isExecuted: boolean }[] // other transactions at the same nonce
   phase?: string; error?: string; fatal?: string; execHash?: Hex; execOk?: boolean; open?: boolean
   uploadError?: string // a signature or proposal made here that didn't reach the service
@@ -70,7 +70,7 @@ const S = {
   found: [] as Pick[], looking: new Set<string>(), lines: '', sourceNote: '', loadingSource: false,
   preparing: false, prepared: [] as Prep[], errors: [] as string[], names: {} as Record<string, Address>, link: '',
   batch: null as Batch | null, id: '', rows: [] as Row[], loadError: '', pasted: '',
-  wallets: [] as Wallet[], provider: null as any, account: null as Address | null, choosing: false,
+  wallets: [] as Wallet[], provider: null as any, account: null as Address | null, walletMenu: '' as '' | 'header' | 'card', // walletMenu: which Connect opened it
   delegations: {} as Record<string, DelegationLookup>, // keyed "account:chainId"
   signing: false, executing: false, waiting: false, current: null as Row | null, open: new Set<string>(), notice: '', copied: '' as '' | 'yes' | 'failed',
   settings: settingsFrom(store.get('safesync:settings', {})), settingsOpen: !!history.state?.settings, settingsChanged: false, closing: false,
@@ -400,7 +400,7 @@ async function readService(r: Row) {
     // Anyone can post an unsigned proposal, so only a trusted (or executed) competitor counts.
     r.others = all.filter(x => x !== t && (x.trusted || x.isExecuted)).map(x => ({ safeTxHash: x.safeTxHash, isExecuted: x.isExecuted }))
     r.proposed = !!t; r.trusted = t?.trusted; r.svcExecuted = t?.isExecuted; r.readAt = Date.now(); r.svc = 'ok'
-    r.proposer = t?.proposedByDelegate ?? (r.proposer && t && !t.trusted ? r.proposer : undefined)
+    r.proposer = t?.proposedByDelegate ?? undefined
     // The service is the truth: a local signature counts as uploaded only if the service has it
     // (a proposal can be deleted in Safe{Wallet}; an upload can fail after the device signed).
     for (const [k, s] of Object.entries(r.sigs)) s.posted = !!t?.confirmations.some(c => c.owner.toLowerCase() === k)
@@ -420,37 +420,41 @@ function post(r: Row, s: Sig) {
     if (s.posted) return void (s.uploading = false)
     try {
       await svc.submit(r.tx, r.hash, s.owner, s.sig, r.proposed)
-      s.posted = true; r.proposed = true; r.trusted = true; r.uploadError = undefined
+      // It counts as uploaded once the service lists it, not just because the upload was accepted.
+      await readService(r)
+      if (r.svc !== 'ok') s.posted = true // accepted, though it couldn't be read back just now
+      r.uploadError = s.posted ? undefined : "Signed, but the Safe service doesn't list it. It's saved in this browser: Retry upload."
     } catch (e) { r.uploadError = `Signed but not uploaded: ${msg(e)}. It's saved in this browser and uploads again on your next visit, or with Retry upload.` }
     s.uploading = false; update()
   })
 }
 
 /**
- * Proposes as someone who isn't an owner: a proposer's signature (or none) only creates the proposal, so it isn't
- * kept, and a failed proposal is simply proposed again.
+ * A proposer's signature only creates the proposal, so it isn't kept: a failed proposal is simply proposed again.
+ * It counts once the service lists it as proposed by this proposer.
  */
-function postProposal(r: Row, from: Address, sig: Hex | null) {
+function postProposal(r: Row, from: Address, sig: Hex) {
   r.proposing = true
   r.posting = (r.posting ?? Promise.resolve()).then(async () => {
     try {
-      await svc.propose(r.tx, r.hash, from, sig, r.owners![0])
-      r.proposed = true; r.trusted = !!sig; r.proposer = from; r.uploadError = undefined
+      await svc.propose(r.tx, r.hash, from, sig)
+      await readService(r)
+      if (r.svc !== 'ok') r.proposer = from // accepted, though it couldn't be read back just now
+      r.uploadError = r.proposer?.toLowerCase() === from.toLowerCase() ? undefined : "Proposed, but the Safe service doesn't list it. Propose again to retry."
     } catch (e) { r.uploadError = `Not proposed: ${msg(e)}. Propose again to retry.` }
     r.proposing = false; update()
   })
 }
 
 // Proposers are the delegates an owner named in Safe{Wallet}: they propose signed, and their signature never counts.
-// Anyone else proposes unsigned. Looked up once per account and chain, only where the account might propose; a failed
-// lookup counts as "not a proposer", so proposing still works (unsigned).
+// Anyone else only views the link. Looked up once per account and chain, only where the account might propose.
 const needsDelegations = (r: Row, a: Address) => r.svc === 'ok' && (!r.proposed || r.trusted === false) && !isOwner(r, a) && needsWork(r)
 function lookupDelegations(chainId: number, account: Address): DelegationLookup {
   const key = `${account}:${chainId}`
   if (S.delegations[key]) return S.delegations[key]
   const lookup: DelegationLookup = {
     promise: svc.delegations(chainId, account).then(data => { lookup.data = data }, e => {
-      lookup.data = []; S.notice = `Couldn't check proposers on ${chainName(chainId)}, so proposals there go up unsigned: ${msg(e)}`
+      lookup.data = []; S.notice = `Couldn't check whether you're a proposer on ${chainName(chainId)}: ${msg(e)}`
     }).finally(update),
   }
   S.delegations[key] = lookup
@@ -479,42 +483,71 @@ function status(r: Row): { kind: Kind; text: string; detail?: string } {
   if (r.execHash) return { kind: 'waiting', text: 'executing…' }
   const n = validSigs(r).length, t = r.threshold!
   if (n >= t) return r.chainNonce === r.tx.nonce ? { kind: 'ready', text: 'ready to execute' } : { kind: 'waiting', text: `signed; nonce ${r.chainNonce} must execute first` }
-  return { kind: 'collecting', text: `${n} of ${t} signatures` }
+  return { kind: 'collecting', text: `${n === 0 && r.proposed ? 'proposed · ' : ''}${n} of ${t} signatures` }
 }
 const needsWork = (r: Row) => ['collecting', 'ready', 'waiting'].includes(status(r).kind)
 const loadingRow = (r: Row) => status(r).kind === 'loading' || r.svc === 'loading'
 const mine = (r: Row) => !!S.account && !!r.sigs[S.account.toLowerCase()]
 const canSign = (r: Row) => isOwner(r, S.account) && !mine(r) && status(r).kind === 'collecting'
-/**
- * Not an owner, and we know whether the account proposes signed (a proposer) or unsigned. Unproposed, or proposed only
- * unsigned: a proposer's signed proposal of the same transaction makes it trusted.
- */
-const canPropose = (r: Row) => !!S.account && r.svc === 'ok' && !r.proposing && !isOwner(r, S.account) && !!S.delegations[`${S.account}:${r.tx.chainId}`]?.data
-  && (!r.proposed || (r.trusted === false && isDelegate(r, S.account))) && status(r).kind === 'collecting'
+/** A proposer, on a transaction nobody has proposed yet (or only unsigned: a proposer's signed proposal makes it trusted). */
+const canPropose = (r: Row) => !!S.account && r.svc === 'ok' && !r.proposing && !isOwner(r, S.account) && isDelegate(r, S.account)
+  && (!r.proposed || r.trusted === false) && status(r).kind === 'collecting'
 const proposedByMe = (r: Row) => !!S.account && !isOwner(r, S.account) && (!!r.proposing || r.proposer?.toLowerCase() === S.account.toLowerCase())
 
 // ---------------------------------------------------------------- wallet
 
-window.addEventListener('eip6963:announceProvider', (e: any) => { if (!S.wallets.some(w => w.info.rdns === e.detail.info.rdns)) S.wallets.push(e.detail); update() })
+window.addEventListener('eip6963:announceProvider', (e: any) => {
+  const w: Wallet = e.detail
+  if (S.wallets.some(x => x.info.rdns === w.info.rdns)) return
+  S.wallets.push(w)
+  // The wallet used last time reconnects quietly, if it still shares an account without asking.
+  if (!S.account && w.info.rdns === store.get('safesync:wallet', '')) w.provider.request({ method: 'eth_accounts' }).then((a: string[]) => { if (a?.[0] && !S.account) use(w.provider, a[0]) }, () => {})
+  update()
+})
 window.dispatchEvent(new Event('eip6963:requestProvider'))
 
-async function connect(w?: Wallet) {
-  const provider = w?.provider ?? (S.wallets.length === 1 ? S.wallets[0].provider : S.wallets.length ? null : (window as any).ethereum)
-  if (!provider) { S.choosing = S.wallets.length > 1; S.notice = S.wallets.length ? '' : 'No browser wallet found.'; return update() }
-  S.choosing = false
+let unlisten = () => {}
+/** Starts using a wallet's account, and follows the account the wallet switches to. */
+function use(provider: any, account: string) {
+  unlisten()
+  const changed = (a: string[]) => {
+    S.account = a[0] ? getAddress(a[0]) : null
+    if (S.signing || S.executing) stop('Wallet account changed, so I stopped.')
+    findDelegations(); update()
+  }
+  provider.on?.('accountsChanged', changed)
+  unlisten = () => provider.removeListener?.('accountsChanged', changed)
+  // Wallets may return lowercase addresses; the Safe service rejects anything not checksummed.
+  S.provider = provider; S.account = getAddress(account)
+  findDelegations(); update()
+}
+
+/** Connects the only wallet there is; with several (or none), opens the menu under the button that asked. */
+async function connect(from: 'header' | 'card', w?: Wallet) {
+  const wallet = w ?? (S.wallets.length === 1 ? S.wallets[0] : undefined)
+  const provider = wallet?.provider ?? (S.wallets.length ? undefined : (window as any).ethereum)
+  if (!provider) return void ((S.walletMenu = S.walletMenu === from ? '' : from), update())
+  S.walletMenu = ''
   try {
-    // Wallets may return lowercase addresses; the Safe service rejects anything not checksummed.
     const [account] = await provider.request({ method: 'eth_requestAccounts' })
-    S.provider = provider; S.account = getAddress(account)
-    provider.on?.('accountsChanged', (a: Address[]) => {
-      S.account = a[0] ? getAddress(a[0]) : null
-      if (S.signing || S.executing) stop('Wallet account changed, so I stopped.')
-      findDelegations(); update()
-    })
-    findDelegations()
-  } catch (e) { S.notice = msg(e) }
+    use(provider, account)
+    store.set('safesync:wallet', wallet?.info.rdns ?? '')
+  } catch (e) { S.notice = msg(e); update() }
+}
+
+function disconnect() {
+  const provider = S.provider
+  stop(); unlisten(); unlisten = () => {}
+  S.account = S.provider = null; S.delegations = {}; S.walletMenu = ''
+  store.set('safesync:wallet', '')
+  // Wallets that support it forget this site as well, so the next Connect asks again.
+  provider?.request?.({ method: 'wallet_revokePermissions', params: [{ eth_accounts: {} }] }).catch(() => {})
   update()
 }
+
+// A wallet menu closes on a click elsewhere, or Escape.
+document.addEventListener('click', e => { if (S.walletMenu && !(e.target as Element).closest?.('.wallet')) S.walletMenu = '', update() })
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && S.walletMenu) S.walletMenu = '', update() })
 
 async function ensureChain(id: number) {
   const p = S.provider
@@ -566,8 +599,6 @@ async function signAll() {
       if (nonce > r.tx.nonce) { r.chainNonce = nonce; continue }
       if (r.svc !== 'none' && Date.now() - r.readAt > 30_000) await readService(r)
       if (stopped() || !todo(r)) continue
-      // Not an owner or proposer: an unsigned proposal needs no wallet.
-      if (!isOwner(r, account) && !isDelegate(r, account)) { postProposal(r, account, null); continue }
       r.phase = 'switching network'; update()
       await ask(() => ensureChain(r.tx.chainId))
       if (stopped()) break
@@ -700,7 +731,7 @@ function copyButton(text: string, label = 'Copy address') {
 }
 /** An address: short, the full one in its tooltip, with a copy button and its label (an ENS name) if it has one. */
 const addr = (a: string, labels: Record<string, string> = S.batch?.labels ?? {}, cls = 'mono') =>
-  html`<span class="addr"><span class=${cls} data-tip=${a}>${short(a)}</span>${copyButton(a)}</span>${labels[a.toLowerCase()] ? html` <span class="label">${labels[a.toLowerCase()]}</span>` : nothing}`
+  html`<span class="addr"><span class=${cls} data-tip=${a}>${short(a)}</span>${copyButton(a)}</span>${labels[a.toLowerCase()] ? html` <span class="label">(${labels[a.toLowerCase()]})</span>` : nothing}`
 const chainChip = (id: number) => html`<span class="chip" data-tip=${chainName(id)}>${chainOf(id)?.short ?? id}</span>`
 const safeLink = (tx: { chainId: number; safe: string }, hash?: string) => {
   const c = chainOf(tx.chainId), s = c?.service
@@ -713,7 +744,7 @@ function safeAddr(chainId: number, safe: string, labels: Record<string, string>)
   return html`<span class="addr">
     ${link ? html`<a class="mono" href=${link} target="_blank" rel="noopener" data-tip=${safe} @click=${(e: Event) => e.stopPropagation()}>${short(safe)}</a>` : html`<span class="mono" data-tip=${safe}>${short(safe)}</span>`}
     ${copyButton(safe)}
-    ${labels[safe.toLowerCase()] ? html`<span class="label">${labels[safe.toLowerCase()]}</span>` : nothing}
+    ${labels[safe.toLowerCase()] ? html`<span class="label">(${labels[safe.toLowerCase()]})</span>` : nothing}
   </span>`
 }
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
@@ -1006,7 +1037,8 @@ const composeView = () => html`${stageBar(S.stage)}${S.stage === 1 ? safeStage()
 // ---------------------------------------------------------------- batch view
 
 /**
- * The connected account's checklist: ✓ you signed or proposed it, ○ it needs you, – nothing for you to do. A dashed
+ * The connected account's checklist: ✓ the Safe service has your signature or proposal, ○ it needs you, – nothing for
+ * you to do (anyone who isn't an owner or proposer only views the link). A dashed
  * ring is yours but not in the Safe service yet (yellow: the upload failed), ! is a problem, a thin spinner still
  * loading. The details are in each mark's tooltip.
  */
@@ -1019,10 +1051,10 @@ function icon(r: Row, st: ReturnType<typeof status>) {
   if (S.account && !isOwner(r, S.account) && S.delegations[`${S.account}:${r.tx.chainId}`] && !S.delegations[`${S.account}:${r.tx.chainId}`].data) return mark('load', 'Checking whether you can propose this…')
   if (!S.account) return mark('todo quiet', 'Connect a wallet to see what you can do here')
   if (r.proposing || (mine(r) && r.sigs[S.account.toLowerCase()].uploading)) return mark('pending', 'Uploading to the Safe service…')
-  if (mine(r)) return mark('done', 'You signed this', '✓')
-  if (proposedByMe(r)) return mark('done', r.trusted === false ? 'You proposed this unsigned: Safe{Wallet} lists it once an owner signs' : 'You proposed this', '✓')
+  if (mine(r)) return r.svc === 'ok' && !r.sigs[S.account.toLowerCase()].posted ? mark('pending', 'Signed, not in the Safe service yet') : mark('done', 'You signed this', '✓')
+  if (proposedByMe(r)) return mark('done', 'You proposed this', '✓')
   if (canSign(r)) return mark('todo', 'Needs your signature')
-  if (canPropose(r)) return mark('todo', isDelegate(r, S.account) ? 'Not proposed yet: you can, as a proposer' : 'Not proposed yet: you can, unsigned')
+  if (canPropose(r)) return mark('todo', 'Not proposed yet: you can, as a proposer')
   return mark('idle', 'Nothing for you to do', '–')
 }
 const KIND_CLASS: Record<Kind, string> = { loading: 'muted', collecting: '', ready: 'good', waiting: 'muted', executed: 'good', blocked: 'bad', unknown: 'warn' }
@@ -1040,7 +1072,7 @@ function progressView() {
   const progress = [signs.length && `signed ${signed} of ${signs.length}`, proposals.length && `proposed ${proposed} of ${proposals.length}`].filter(Boolean).join(', ')
   const working = both ? 'Signing and proposing' : proposals.length ? 'Proposing' : 'Signing'
   const finished = both ? `Signed ${signs.length}, proposed ${proposals.length}` : `${proposals.length ? 'Proposed' : 'Signed'} all ${yours.length}`
-  const unsigned = S.account ? proposals.filter(r => !proposedByMe(r) && !isDelegate(r, S.account!)).length : 0
+  const involved = !!S.account && S.rows.some(r => isOwner(r, S.account) || isDelegate(r, S.account!))
   const reading = S.rows.filter(loadingRow).length, read = S.rows.length - reading
   const lookingUp = S.account && S.rows.some(r => { const lookup = S.delegations[`${S.account}:${r.tx.chainId}`]; return lookup && !lookup.data })
   const waitText = reading ? `Reading Safes · ${read} of ${S.rows.length}` : lookingUp ? 'Checking proposer access…' : ''
@@ -1056,10 +1088,10 @@ function progressView() {
   const bar = html`<div class="bar"><i style=${`width:${yours.length ? Math.round((done / yours.length) * 100) : 0}%`}></i></div>`
   const cur = S.current
   return html`
-  ${!S.account ? html`<div class="row">
-      <button class="primary" @click=${() => connect()}>Connect wallet</button>
-      ${S.choosing ? S.wallets.map(w => html`<button @click=${() => connect(w)}><img src=${w.info.icon} alt="">${w.info.name}</button>`) : nothing}
-    </div>`
+  ${!S.account ? html`<div class="row"><span class="wallet">
+      <button class="primary" aria-haspopup="menu" @click=${() => connect('card')}>Connect wallet</button>
+      ${S.walletMenu === 'card' ? walletMenu('card') : nothing}
+    </span></div>`
   : S.signing ? html`<div class="row"><b class="grow">${working} ${Math.min(done + 1, yours.length)} of ${yours.length}</b><button @click=${() => stop()}>Pause</button></div>
       ${bar}
       ${cur ? html`<div class="current">
@@ -1069,9 +1101,8 @@ function progressView() {
         <div class="hashes"><span class="muted">message hash</span><span class="mono">${messageHash(cur.tx)}</span></div>
       </div>` : nothing}`
   : remaining ? html`<div class="row">
-      <span class="grow">${addr(S.account)} · ${progress}</span>
-      <button class="primary" @click=${signAll} ?disabled=${busy}
-        data-tip=${unsigned ? "You're not an owner or proposer here, so these go up unsigned: Safe{Wallet} lists them once an owner signs" : nothing}>${S.waiting ? 'Waiting for wallet…' : action}</button>
+      <span class="grow">${progress.replace(/^./, c => c.toUpperCase())}</span>
+      <button class="primary" @click=${signAll} ?disabled=${busy}>${S.waiting ? 'Waiting for wallet…' : action}</button>
     </div>${bar}`
   : yours.length ? html`<div class="row">
       <span class="done-msg grow">✓ ${finished}${uploading && !notUploaded ? html` <span class="muted small">uploading…</span>` : nothing}</span>
@@ -1079,10 +1110,10 @@ function progressView() {
       ${manual.length ? html`<button @click=${() => copy(exportSigs())}>Copy signatures for ${manual.map(r => chainChip(r.tx.chainId))}</button>` : nothing}
     </div>${bar}`
   : blocked ? html`<div class="row">
-      <span class="grow">${addr(S.account)}</span>
+      <span class="grow"></span>
       ${waitButton(waitText)}
     </div>`
-  : html`<div class="muted">${addr(S.account)} · nothing to sign or propose</div>`}
+  : html`<div class="muted">${involved ? 'Nothing left for you to sign' : 'Not an owner or proposer of these Safes'}</div>`}
   <div class="row small">
     <span class="grow muted">Executed ${executed} of ${S.rows.length}</span>
     ${waitText && !blocked ? busyLine(waitText) : nothing}
@@ -1099,8 +1130,6 @@ function batchView() {
   const b = S.batch!
   const items: Item[] = S.rows.map(r => ({ tx: r.tx, owners: r.owners, threshold: r.threshold, done: status(r).kind === 'executed', failed: r.chainNonce === undefined && !!r.error }))
   const except = exceptions(items)
-  const manual = S.rows.filter(r => r.svc === 'none' && needsWork(r))
-  const toShare = S.rows.reduce((n, r) => n + unshared(r).length, 0)
   return html`
   <section class="card">
     <div class="row">
@@ -1143,20 +1172,15 @@ function batchView() {
           <span>domain hash</span><span class="mono wrap">${domainHash(r.tx)}</span>
           <span>message hash</span><span class="mono wrap">${messageHash(r.tx)}</span>
           <span>signed by</span><span>${validSigs(r).map(x => html`<div>${addr(x.owner)}${r.svc === 'ok' && !x.posted ? html` <span class="warn">not uploaded</span>` : nothing}</div>`)}</span>
+          ${r.svc === 'none' && needsWork(r) ? html`<span>add signatures</span><span class="row">
+            <textarea class="grow mono small" rows="1" aria-label="Paste signatures" placeholder="Signatures copied from another signer" .value=${live(S.pasted)} @input=${(e: any) => { S.pasted = e.target.value; update() }}></textarea>
+            <button @click=${importSigs} ?disabled=${!S.pasted.trim()}>Add</button>
+          </span>` : nothing}
           ${link ? html`<span>open in</span><span><a href=${link} target="_blank" rel="noopener">${chainOf(r.tx.chainId)?.service ? 'Safe{Wallet}' : 'explorer'}</a>${r.execHash ? html` · <a href=${`${chainOf(r.tx.chainId)?.explorer}/tx/${r.execHash}`} target="_blank" rel="noopener">execution</a>` : nothing}</span>` : nothing}
         </div>
       </td></tr>` : nothing}`
     })}</tbody></table></div>
-  </section>
-
-  ${manual.length || toShare ? html`<section class="card">
-    <div class="row"><h3 class="grow">Share signatures</h3>${manual.map(r => chainChip(r.tx.chainId))}</div>
-    <div class="row">
-      <button @click=${() => copy(exportSigs())} ?disabled=${!toShare}>Copy ${plural(toShare, 'signature')}</button>
-      <textarea class="grow" rows="1" aria-label="Paste signatures" placeholder="Paste signatures" .value=${live(S.pasted)} @input=${(e: any) => { S.pasted = e.target.value; update() }}></textarea>
-      <button @click=${importSigs} ?disabled=${!S.pasted.trim()}>Add</button>
-    </div>
-  </section>` : nothing}`
+  </section>`
 }
 
 // ---------------------------------------------------------------- settings & shell
@@ -1297,11 +1321,28 @@ function settingsView() {
   </section>`
 }
 
+/** Connected: the address (with copy) and Disconnect. Otherwise the wallets this browser has. */
+const walletMenu = (from: 'header' | 'card') => html`<div class="menu" role="menu">${S.account
+  ? html`<div class="row">${addr(S.account)}</div><button class="ghost" role="menuitem" @click=${disconnect}>Disconnect</button>`
+  : S.wallets.length ? S.wallets.map(w => html`<button class="ghost" role="menuitem" @click=${() => connect(from, w)}><img src=${w.info.icon} alt="">${w.info.name}</button>`)
+  : html`<div class="muted small">No browser wallet found</div>`}</div>`
+
+function walletButton() {
+  const open = S.walletMenu === 'header'
+  return html`<span class="wallet">
+    ${S.account
+      ? html`<button class="account" aria-haspopup="menu" aria-expanded=${open} @click=${() => { S.walletMenu = open ? '' : 'header'; update() }}><i class="dot"></i><span class="mono">${short(S.account)}</span></button>`
+      : html`<button class="primary" aria-haspopup="menu" @click=${() => connect('header')}>Connect wallet</button>`}
+    ${open ? walletMenu('header') : nothing}
+  </span>`
+}
+
 function view(): TemplateResult {
   return html`
   <header>
     <a class="brand grow" href=${location.pathname + location.search} @click=${(e: Event) => { e.preventDefault(); if (S.mode === 'compose') return void (S.stage > 1 && goTo(1)); history.pushState({ stage: 1 }, '', location.pathname + location.search); route() }}>Safe Sync</a>
     ${S.settingsOpen ? nothing : html`<button class="ghost" @click=${openSettings}>Settings</button>`}
+    ${walletButton()}
   </header>
   <main class=${S.settingsOpen || S.mode === 'compose' ? 'narrow' : ''}>${S.settingsOpen ? settingsView() : S.mode === 'batch' ? batchView() : composeView()}</main>`
 }
