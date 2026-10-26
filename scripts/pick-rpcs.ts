@@ -2,8 +2,7 @@
 // answer a browser on the app's origin correctly, CORS preflight included.
 // Usage: bun scripts/pick-rpcs.ts
 
-// Where the app is served. Most RPCs allow any origin ("*"); this catches ones that don't, or refuse the preflight.
-const ORIGIN = 'https://safe-sync.wavey.info'
+import { probe } from './rpc-probe'
 
 // Chains with an official Safe Transaction Service, keyed by its EIP-3770 short name.
 const SERVICE: Record<number, string> = {
@@ -29,32 +28,6 @@ const list: Rec[] = await (await fetch('https://chainlist.org/rpcs.json')).json(
 const byId = new Map(list.map(r => [r.chainId, r]))
 // Lower is better. drpc/1rpc free tiers cap batches and drop calls under load, so they go last.
 const rank = (t: string | undefined, url: string) => (({ none: 0, limited: 1 } as Record<string, number>)[t ?? ''] ?? (t === 'yes' ? 3 : 2)) + (/drpc\.org|1rpc\.io/.test(url) ? 4 : 0)
-
-const allows = (res: Response) => ['*', ORIGIN].includes(res.headers.get('access-control-allow-origin') ?? '')
-
-async function probe(url: string, id: number): Promise<{ ms: number; revert: boolean }> {
-  const t0 = performance.now()
-  // A browser asks first (a JSON POST isn't a "simple" request), and sends nothing if the answer is no.
-  const pre = await fetch(url, {
-    method: 'OPTIONS', signal: AbortSignal.timeout(4000),
-    headers: { origin: ORIGIN, 'access-control-request-method': 'POST', 'access-control-request-headers': 'content-type' },
-  })
-  if (!allows(pre)) throw new Error('preflight refused')
-  const call = async (method: string, params: unknown[]) => {
-    const res = await fetch(url, {
-      method: 'POST', signal: AbortSignal.timeout(4000),
-      headers: { 'content-type': 'application/json', origin: ORIGIN },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-    })
-    if (!allows(res)) throw new Error('no cors')
-    return res.json()
-  }
-  // A reverting eth_call too: simulation needs the revert data back.
-  const [chain, block, revert] = await Promise.all([call('eth_chainId', []), call('eth_blockNumber', []), call('eth_call', [{ data: '0x60016000526001601ffd' }, 'latest'])])
-  if (Number(chain.result) !== id || !block.result) throw new Error('bad')
-  // Non-EVM-equivalent chains (zkSync) cannot run init code in eth_call; accept them, but rank lower.
-  return { ms: performance.now() - t0, revert: JSON.stringify(revert.error ?? '').includes('"0x01"') }
-}
 
 const rows: string[] = []
 for (const id of [...Object.keys(SERVICE).map(Number), ...EXTRA]) {
