@@ -39,8 +39,9 @@ browser's Back and Forward move between them, and a reload stays on the step you
    - Nothing queued: the Safe's on-chain nonce.
    - This same transaction already queued: its nonce, so its signatures count.
    - Something else queued and signed: after it by default. Unsigned proposals don't count, since
-     anyone can post one. That Safe's row gets a choice: *After queue (nonce 7)*, or *Replace (nonce 5)*,
-     Safe{Wallet}'s word for a competing transaction at the same nonce. Opening the row
+     anyone can post one. That Safe's row shows its nonce (*nonce 7*, amber when replacing), which
+     opens a choice: *After queue (nonce 7)*, or *Replace (nonce 5)*, Safe{Wallet}'s word for a
+     competing transaction at the same nonce. Opening the row
      lists what's queued, linked to Safe{Wallet}. With two or more such Safes, *After queue* /
      *Replace* sets them all. Choices are kept in the draft, and changing one redoes only that Safe.
    - The queue couldn't be read: the Safe needs attention, with ↻, and stays out of the link until it's

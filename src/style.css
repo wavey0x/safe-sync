@@ -112,15 +112,18 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .select::after { content: ''; position: absolute; right: 12px; top: calc(50% - 5px); width: 6px; height: 6px; border: solid var(--muted); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); pointer-events: none; }
 .reference { display: grid; gap: 4px; }
 .reference .select, .reference select { width: 100%; min-width: 0; }
-.select.small select { padding: 3px 28px 3px 8px; font-size: 13px; font-weight: 500; } .select.small::after { right: 11px; }
-.select.warn select { color: var(--warn); border-color: var(--warn); }
+/* A review row's nonce choice: the nonce in a chip, with its select laid invisibly over it (nonceSelect) */
+.pick-nonce { position: relative; display: inline-block; background: var(--chip); border-radius: 5px; padding: 0 16px 0 6px; font-size: 12px; font-family: var(--mono); white-space: nowrap; cursor: pointer; }
+.pick-nonce::after { content: ''; position: absolute; right: 6px; top: calc(50% - 4px); width: 4px; height: 4px; border: solid var(--muted); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); pointer-events: none; }
+.pick-nonce select { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; font: inherit; }
+.pick-nonce:hover { box-shadow: inset 0 0 0 1px var(--accent); } .pick-nonce:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pick-nonce.warn, .pick-nonce.warn:hover { box-shadow: inset 0 0 0 1px var(--warn); }
 .queue-bar { flex-wrap: wrap; } .queue-bar .grow { flex: 1 0 auto; }
-tr.has-sub td { border-bottom: 0; } tr.sub td { padding-top: 0; }
 .queued { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 4px 0 2px; }
 .retry { padding: 0 6px; }
 pre { margin: 6px 0 0; white-space: pre-wrap; }
 /* A row's chevron: a button in its own right, lit up while the row is hovered, turned down when open */
-.disclose { padding: 3px; border-radius: 6px; vertical-align: middle; }
+.disclose { padding: 2px; border-radius: 6px; vertical-align: middle; }
 .disclose svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform .15s; }
 .disclose[aria-expanded=true] svg { transform: rotate(90deg); }
 tr:hover .disclose, .disclose[aria-expanded=true] { color: var(--fg); background: var(--chip); }
@@ -181,7 +184,7 @@ button:disabled:has(.spin) { opacity: .75; cursor: progress; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-@media (max-width: 520px) { td { padding-left: 4px; padding-right: 4px; } } /* every column fits on a phone, ▸ included */
+@media (max-width: 520px) { td { padding-left: 4px; padding-right: 4px; } } /* every column fits on a phone, chevron included */
 td > .mono, td > .chip { white-space: nowrap; }
 td.ico-cell { width: 28px; padding-right: 0; }
 td.grow-cell { width: 100%; }

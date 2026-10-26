@@ -982,13 +982,17 @@ function changeStage() {
   </section>`
 }
 
-/** After the queue (the default) or replacing what's queued at the on-chain nonce: the proposer's call, per Safe. */
+/**
+ * After the queue (the default) or replacing what's queued at the on-chain nonce: the proposer's call, per Safe.
+ * The row shows only the nonce (amber when replacing); the select laid invisibly over it lists both choices in full.
+ */
 function nonceSelect(p: Prep) {
-  const choice = choiceOf(p), after = pickNonce({ ...p.tx!, nonce: p.state!.nonce }, p.queue!, 'after').nonce
-  return html`<span class=${`select small ${choice === 'replace' ? 'warn' : ''}`} @click=${(e: Event) => e.stopPropagation()}>
+  const choice = choiceOf(p), after = pickNonce({ ...p.tx!, nonce: p.state!.nonce }, p.queue!, 'after').nonce, now = p.state!.nonce
+  return html`<span class=${`pick-nonce ${choice === 'replace' ? 'warn' : ''}`} data-tip=${choice === 'replace' ? `Replaces what's queued at nonce ${now}` : `After what's queued, or replace it at nonce ${now}`} @click=${(e: Event) => e.stopPropagation()}>
+    nonce ${choice === 'replace' ? now : after}
     <select aria-label=${`Nonce on ${chainName(p.chainId)}`} @change=${(e: any) => chooseNonce(p, e.target.value)}>
       <option value="after" .selected=${choice === 'after'}>After queue (nonce ${after})</option>
-      <option value="replace" .selected=${choice === 'replace'}>Replace (nonce ${p.state!.nonce})</option>
+      <option value="replace" .selected=${choice === 'replace'}>Replace (nonce ${now})</option>
     </select>
   </span>`
 }
@@ -1015,11 +1019,12 @@ function reviewStage() {
       const only = p.tx ? except(ready.indexOf(p)) : ''
       const key = keyOf(p), open = !!p.tx && S.open.has(key)
       const toggle = () => { if (!p.tx) return; open ? S.open.delete(key) : S.open.add(key); update() }
-      return html`<tr class=${`${p.tx ? 'click' : ''} ${queuedAhead(p) ? 'has-sub' : ''}`} @click=${toggle}>
+      return html`<tr class=${p.tx ? 'click' : ''} @click=${toggle}>
         <td class="ico-cell">${k === 'ready' ? mark('todo', 'Needs signatures') : k === 'synced' ? mark('idle', 'Already in sync', '–') : k === 'attention' ? mark('warn', p.error ?? 'Needs attention', '!') : mark('load', 'Checking this Safe…')}</td>
         <td>${chainChip(p.chainId)}</td>
         <td>${safeAddr(p.chainId, p.safe, labels)}</td>
         <td class="grow-cell small">
+          ${queuedAhead(p) ? nonceSelect(p) : nothing}
           ${p.error ? html`<span class="bad">${p.error}</span> <button class="ghost retry" aria-label="Try again" @click=${(e: Event) => { e.stopPropagation(); retryPrepare(i) }}>↻</button>` : nothing}
           ${p.same ? html`<span class="muted">already queued; its signatures count</span>` : nothing}
           ${only ? html`<span>${only}</span>` : nothing}
@@ -1028,7 +1033,6 @@ function reviewStage() {
         </td>
         <td>${p.tx ? disclose(open, `Details for ${chainName(p.chainId)}`, toggle) : nothing}</td>
       </tr>
-      ${queuedAhead(p) ? html`<tr class="sub"><td></td><td colspan="4">${nonceSelect(p)}</td></tr>` : nothing}
       ${open ? html`<tr class="details"><td></td><td colspan="4">
         ${queuedAhead(p) ? html`<div class="queued small"><span class="muted">Queued</span>${p.queue!.map(q => html`<a href=${safeLink(p, q.safeTxHash)!} target="_blank" rel="noopener">nonce ${q.nonce}</a>`)}</div>` : nothing}
         ${actionsView(p.tx!, labels)}
