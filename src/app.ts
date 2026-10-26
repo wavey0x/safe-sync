@@ -1164,7 +1164,7 @@ function batchView() {
           <span>to</span><span><span class="mono wrap">${r.tx.to}</span>${copyButton(r.tx.to)}</span>
           <span>value</span><span class="mono">${r.tx.value}</span>
           <span>operation</span><span>${r.tx.operation === 1 ? 'DELEGATECALL (1)' : 'CALL (0)'}</span>
-          <span>data</span><span class="mono wrap">${r.tx.data} <a href=${`https://safe.eth.sh/calldata-decoder?calldata=${encodeURIComponent(r.tx.data)}`} target="_blank" rel="noopener noreferrer" title="Decode in ETH.sh" aria-label="Decode in ETH.sh">↗</a></span>
+          <span>data</span><span class="mono wrap">${r.tx.data} <a class="nowrap" href=${`https://safe.eth.sh/calldata-decoder?calldata=${encodeURIComponent(r.tx.data)}`} target="_blank" rel="noopener noreferrer" title="Decode in ETH.sh">View on ETH.sh ↗</a></span>
           <span>gas and refund</span><span class="mono">all zero</span>
           <span>safeTxHash</span><span class="mono wrap">${r.hash}</span>
           <span>domain hash</span><span class="mono wrap">${domainHash(r.tx)}</span>
