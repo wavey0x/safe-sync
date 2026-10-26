@@ -375,8 +375,11 @@ function firstDeployed(chainId: number, candidates: Address[]): Promise<Address>
 export type Prepared = Target & { state?: SafeState; tx?: Tx; hash?: Hex; owners?: Address[]; threshold?: number; notes: string[]; sim?: Sim; error?: string; skip?: string }
 export type Sim = { ok: true; gas: bigint } | { ok: false; error: string; definite: boolean }
 
-/** Reads one Safe, builds its transaction, simulates it and cross-checks the hash on-chain. Never throws. */
-export async function prepareTarget(t: Target, actions: Action[], names: Record<string, Address>, nonceFor?: (chainId: number, safe: Address, nonce: number) => Promise<number>): Promise<Prepared> {
+/**
+ * Reads one Safe, builds its transaction, simulates it and cross-checks the hash on-chain. Never throws.
+ * `nonceFor` gets the transaction at the Safe's on-chain nonce and returns the nonce to use (see pickNonce).
+ */
+export async function prepareTarget(t: Target, actions: Action[], names: Record<string, Address>, nonceFor?: (tx: Tx) => Promise<number>): Promise<Prepared> {
   const p: Prepared = { ...t, notes: [] }
   try {
     const state = p.state = await readSafe(t.chainId, t.safe)
@@ -389,8 +392,8 @@ export async function prepareTarget(t: Target, actions: Action[], names: Record<
     const env = b.calls.length === 1
       ? { to: b.calls[0].to, value: b.calls[0].value, data: b.calls[0].data, operation: 0 as const }
       : { to: await firstDeployed(t.chainId, MULTISEND_CALL_ONLY), value: 0n, data: packMultiSend(b.calls), operation: 1 as const }
-    const nonce = nonceFor ? await nonceFor(t.chainId, t.safe, state.nonce) : state.nonce
-    const tx: Tx = { chainId: t.chainId, safe: t.safe, nonce, to: env.to, value: env.value.toString(), data: env.data, operation: env.operation }
+    const tx: Tx = { chainId: t.chainId, safe: t.safe, nonce: state.nonce, to: env.to, value: env.value.toString(), data: env.data, operation: env.operation }
+    if (nonceFor) tx.nonce = await nonceFor(tx)
     const [onchain, sim] = await Promise.all([onchainHash(tx), simulate(tx)])
     p.tx = tx; p.hash = safeTxHash(tx); p.sim = sim
     if (onchain !== p.hash) throw new Error(`Hash mismatch: local ${p.hash}, on-chain ${onchain}`)
@@ -585,6 +588,20 @@ export function applyOps(owners: string[], threshold: number, ops: OwnerOp[]) {
     else t = op.n
   }
   return { owners: o, threshold: t }
+}
+
+export type Queued = { nonce: number; safeTxHash: Hex }
+export type NonceChoice = 'after' | 'replace'
+/**
+ * The nonce for `tx` (built at the Safe's on-chain nonce), given what's already queued for the Safe. The same transaction
+ * already queued keeps its nonce, so its signatures count. Otherwise nothing is replaced unless chosen: 'after' goes after
+ * the last queued transaction, 'replace' takes the on-chain nonce and competes with whatever is queued there.
+ */
+export function pickNonce(tx: Tx, queue: Queued[], choice: NonceChoice): { nonce: number; same?: true } {
+  const pending = queue.filter(q => q.nonce >= tx.nonce)
+  const same = pending.find(q => q.safeTxHash.toLowerCase() === safeTxHash({ ...tx, nonce: q.nonce }))
+  if (same) return { nonce: same.nonce, same: true }
+  return { nonce: pending.length && choice === 'after' ? Math.max(...pending.map(q => q.nonce)) + 1 : tx.nonce }
 }
 
 /** Grouping key: identical payloads up to the Safe's own address. */

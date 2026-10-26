@@ -32,8 +32,19 @@ browser's Back and Forward move between them, and a reload stays on the step you
    line per call: *Swap* out → in, *Add* in green, *Remove* in red, and the threshold only where a call
    changes it. Unchanged owners sit behind a toggle. Safes whose calls differ get their own group.
    Results come back as ready, already in sync, or needs attention, and each Safe's row opens to its
-   exact steps. Checking each Safe's Safe{Wallet} queue for competing transactions goes on in the
-   background and doesn't hold up the link.
+   exact steps.
+
+   **Nonces** come from each Safe's queue in the Safe Transaction Service, and nothing queued is
+   replaced unless you choose to:
+   - Nothing queued: the Safe's on-chain nonce.
+   - This same transaction already queued: its nonce, so its signatures count.
+   - Something else queued and signed: after it by default. Unsigned proposals don't count, since
+     anyone can post one. That Safe's row gets a choice, *Nonce 7 · after 2 queued* or *Nonce 5 ·
+     replace* (Safe{Wallet}'s word for a competing transaction at the same nonce). Opening the row
+     lists what's queued, linked to Safe{Wallet}. With two or more such Safes, *After queue* /
+     *Replace* sets them all. Choices are kept in the draft, and changing one redoes only that Safe.
+   - The queue couldn't be read: the Safe needs attention, with ↻, and stays out of the link until it's
+     read. Chains without a Safe service use the on-chain nonce.
 4. **Copy signing link** creates the link and copies it ("Copied ✓"); *Propose now* opens it, so you
    can put it in Safe{Wallet} yourself (see below). Going back without changing anything keeps the
    results; any edit throws them away, so a link never carries stale transactions. *Edit* on a signing
@@ -100,8 +111,8 @@ bun run sandbox:simple                           # a 2-of-2 Safe on 3 local-only
   - 14 anvil chains with real chain ids, all served by the mock Safe service (never a real one).
   - The canonical Safe 1.3.0 and 1.4.1 contracts at their canonical addresses (fixtures in `test/fixtures`).
   - A 5-of-9 team Safe everywhere, a reordered "original" Safe on Ethereum, and a 1.4.1 Safe on Scroll.
-  - Mixed nonces, a rotation already done on Linea, a conflicting queued transaction on Gnosis, and
-    the same rotation already queued with one signature.
+  - Mixed nonces, a rotation already done on Linea, other transactions already queued on Gnosis (one)
+    and Polygon (two), and the same rotation already queued with one signature.
   - A proposer (a delegate of owner 2) in the sandbox wallet, to try proposing signed; "Not an owner"
     proposes unsigned.
   - Other wallets are hidden here: with real chain ids, a real wallet would send executions to the
@@ -135,5 +146,5 @@ rather than opening it directly.
 ## Not supported, on purpose
 
 Safe < 1.3.0; contract owners (EIP-1271); WalletConnect; direct USB to hardware wallets (use the
-device through Rabby, MetaMask or Frame); non-zero gas or refund fields; nonce juggling beyond
-"queue after pending transactions".
+device through Rabby, MetaMask or Frame); non-zero gas or refund fields; nonces other than "after the
+queue" or "replace the lowest".

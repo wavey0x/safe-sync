@@ -70,7 +70,10 @@ export async function atNonce(chainId: number, safe: Address, nonce: number): Pr
   return (await res.json()).results
 }
 
-/** Other not-yet-executed transactions queued at or after `nonce` (potential conflicts). */
+/**
+ * Other not-yet-executed transactions queued at or after `nonce`: trusted ones only (the service's default), since anyone
+ * can post an unsigned proposal. They decide the nonce of a new transaction (pickNonce).
+ */
 export async function queued(chainId: number, safe: Address, nonce: number): Promise<{ nonce: number; safeTxHash: Hex }[]> {
   const res = await api(chainId, `/v2/safes/${safe}/multisig-transactions/?executed=false&nonce__gte=${nonce}&limit=50`)
   if (!res.ok) await fail(res)

@@ -3,8 +3,8 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { createWalletClient, encodeFunctionData, http, parseAbi, publicActions, type Address, type Hex } from 'viem'
 import {
-  config, execData, findSafe, normalizeSig, parseActions, parseTargets, payloadKey, prepareTarget, readSafe, safeTxHash, sigOwner,
-  walletTypedData, type Prepared, type Tx,
+  config, execData, findSafe, normalizeSig, parseActions, parseTargets, payloadKey, pickNonce, prepareTarget, readSafe, safeTxHash, sigOwner,
+  walletTypedData, type NonceChoice, type Prepared, type Tx,
 } from '../src/safe'
 import * as svc from '../src/service'
 import { startMockService } from './mock-service'
@@ -14,9 +14,12 @@ const enabled = !!Bun.which('anvil')
 let sb: Sandbox
 // Every test can run alone: whichever needs the prepared batch first prepares it.
 let preparing: Promise<Prepared[]> | undefined
+// The nonce as the app picks it: from what's queued, and the proposer's choice where something else is.
+const nonceBy = (choice: NonceChoice) => async (tx: Tx) => pickNonce(tx, svc.serviceUrl(tx.chainId) ? await svc.queued(tx.chainId, tx.safe, tx.nonce) : [], choice).nonce
+// This proposer replaces what's queued on Gnosis and Polygon, so every chain can execute.
 const prepareAll = () => (preparing ??= (async () => {
   const t = parseTargets(sb.targets), a = parseActions(sb.actions)
-  return Promise.all(t.targets.map(x => prepareTarget(x, a.actions, {})))
+  return Promise.all(t.targets.map(x => prepareTarget(x, a.actions, {}, nonceBy('replace'))))
 })())
 
 beforeAll(async () => {
@@ -62,8 +65,12 @@ test.skipIf(!enabled)('prepare sorts the 16 Safes into ready and already applied
   expect(new Set(ready.map(p => payloadKey(p.tx!))).size).toBe(2)
   const orig = (await svc.getTx(1, ready.find(p => p.safe === sb.original)!.hash!))!
   expect(orig.confirmations.map(c => c.owner)).toEqual([OWNERS[1].address])
-  const queued = await svc.queued(100, sb.team, 0)
-  expect(queued.some(q => q.safeTxHash !== ready.find(p => p.chainId === 100)!.hash)).toBe(true)
+  // Something else is queued on Gnosis (one) and Polygon (two): by default the nonce goes after it, replacing takes the on-chain one.
+  expect([nonce(100), nonce(137)]).toEqual([0, 0])
+  const after = (chainId: number, safe = sb.team) => prepareTarget({ chainId, safe }, a.actions, {}, nonceBy('after')).then(p => p.tx!.nonce)
+  expect(await Promise.all([after(100), after(137)])).toEqual([1, 2])
+  // The rotation already queued on the original Safe keeps its nonce either way, so its signature counts.
+  expect(await after(1, sb.original)).toBe(3)
 }, 60_000)
 
 test.skipIf(!enabled)('five owners sign everything through the service, then one executor runs it on every chain', async () => {

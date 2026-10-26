@@ -174,17 +174,24 @@ export async function startSandbox({ basePort = 0, servicePort = 0, rps = 2, log
     const post = (chainId: number, path: string, body: unknown) =>
       fetch(`${service.url(chainId)}/api${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
     const propose = async (tx: Tx, signer: (typeof OWNERS)[number]) => {
-      const res = await post(tx.chainId, `/v2/safes/${tx.safe}/multisig-transactions/`, {
+      const body = {
         to: tx.to, value: tx.value, data: tx.data === '0x' ? null : tx.data, operation: tx.operation, safeTxGas: '0', baseGas: '0', gasPrice: '0',
         gasToken: ZERO, refundReceiver: ZERO, nonce: String(tx.nonce), contractTransactionHash: safeTxHash(tx), sender: signer.address,
         signature: await sign(tx, signer), origin: JSON.stringify({ name: 'Sandbox setup' }),
-      })
+      }
+      let res = await post(tx.chainId, `/v2/safes/${tx.safe}/multisig-transactions/`, body)
+      // The interactive sandbox's service is throttled like the real one: wait as told.
+      while (res.status === 429) {
+        await Bun.sleep(Number(res.headers.get('retry-after') || 1) * 1000)
+        res = await post(tx.chainId, `/v2/safes/${tx.safe}/multisig-transactions/`, body)
+      }
       if (res.status !== 201) throw new Error(`setup proposal failed: ${await res.text()}`)
     }
     // Someone already queued this rotation on the original Safe in Safe{Wallet}, with one signature.
     await propose((await prepareTarget({ chainId: 1, safe: original }, parsed, {})).tx!, pool[1])
-    // An unrelated transaction is queued on Gnosis at the same nonce: a conflict to notice.
-    await propose({ chainId: 100, safe: team, nonce: 0, to: team, value: '0', data: encodeFunctionData({ abi: ABI, functionName: 'changeThreshold', args: [4n] }), operation: 0 }, pool[3])
+    // Something else is already queued: one transaction on Gnosis, two on Polygon. The proposer goes after them or replaces them.
+    const threshold4 = (chainId: number, nonce: number): Tx => ({ chainId, safe: team, nonce, to: team, value: '0', data: encodeFunctionData({ abi: ABI, functionName: 'changeThreshold', args: [4n] }), operation: 0 })
+    for (const tx of [threshold4(100, 0), threshold4(137, 0), threshold4(137, 1)]) await propose(tx, pool[3])
 
     return finish(service, {
       team, original, scroll141, targets, actions, owners,
@@ -234,7 +241,7 @@ Safe Sync sandbox: http://localhost:${server.port}
 
   ${CHAIN_IDS.length} local chains, one mock Safe service for all of them on :${sb.service.port}
   Team Safe ${sb.team} (5-of-9) on every chain, original Safe ${sb.original} on Ethereum, Safe 1.4.1 ${sb.scroll141} on Scroll${signers.length ? `\n  Your signers are owners ${signers.map((a, i) => `${9 - signers.length + i + 1} (${a})`).join(', ')} on all of them, with 100 ETH on every local chain` : ''}
-  Set up to include: different nonces, a rotation already applied on Linea, a conflicting queued tx on Gnosis,
+  Set up to include: different nonces, a rotation already applied on Linea, transactions already queued on Gnosis and Polygon,
   the same rotation already queued on the original Safe with one signature, and a proposer (Safe{Wallet}
   delegate of owner 2) that proposes signed but never confirms. "Not an owner" proposes unsigned.
 

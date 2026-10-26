@@ -6,9 +6,9 @@ import { getAddress, isAddress, toHex, type Address, type Hex } from 'viem'
 import { CHAINS } from './chains'
 import {
   applyOps, batchId, chainName, chainOf, client, config, decodeBatch, describe, domainHash, encodeBatch, execData, findSafe, linesFromTx,
-  linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, prepareTarget, readSafe, resolveNames,
+  linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, pickNonce, prepareTarget, readSafe, resolveNames,
   ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, short, sigOwner, walletTypedData,
-  type Action, type Batch, type Found, type OwnerOp, type Prepared, type Step, type Tx,
+  type Action, type Batch, type Found, type NonceChoice, type OwnerOp, type Prepared, type Queued, type Step, type Target, type Tx,
 } from './safe'
 import * as svc from './service'
 
@@ -37,8 +37,11 @@ type Draft = {
   owners: OwnerRow[]; threshold: number | null; startedFrom: string // startedFrom: "chainId:safe"
   excluded: string[] // "chainId:safe" of chains left out
   source: string
+  nonces: Record<string, NonceChoice> // "chainId:safe" → choice, for Safes with something else queued; 'after' unless chosen
 }
 type Pick = Found & { selected: boolean }
+// queue: other transactions queued at or after the on-chain nonce. same: this very transaction is one of them.
+type Prep = Prepared & { queue?: Queued[]; same?: boolean; checking?: boolean }
 type Stage = 1 | 2 | 3 // Safe, Build Txn, Review
 
 let storageOk = true
@@ -46,14 +49,15 @@ const store = {
   get: <T>(k: string, d: T): T => { try { return JSON.parse(localStorage.getItem(k) ?? '') ?? d } catch { return d } },
   set: (k: string, v: unknown) => { try { localStorage.setItem(k, JSON.stringify(v)) } catch { storageOk = false } },
 }
-const blank = (): Draft => ({ safes: [''], mode: 'owners', owners: [], threshold: null, startedFrom: '', excluded: [], source: '' })
+const blank = (): Draft => ({ safes: [''], mode: 'owners', owners: [], threshold: null, startedFrom: '', excluded: [], source: '', nonces: {} })
 /** Reads a Safe address out of whatever was pasted: a plain address, chain:0x…, or a Safe{Wallet} link. */
 const addressIn = (s: string): Address | undefined => { const m = s.match(/0x[0-9a-fA-F]{40}(?![0-9a-fA-F])/); return m ? getAddress(m[0]) : undefined }
 /** Drafts saved by older versions kept all Safes in one text field. */
 const asDraft = (d: Omit<Partial<Draft>, 'safes'> & { safes?: unknown }): Draft => {
   const safes = typeof d.safes === 'string' ? (d.safes.match(/0x[0-9a-fA-F]{40}/g) ?? []) : Array.isArray(d.safes) ? d.safes.map(String) : []
   const list = <T>(v: unknown): T[] => (Array.isArray(v) ? v : [])
-  return { ...blank(), ...d, safes: safes.length ? safes : [''], owners: list<OwnerRow>(d.owners), excluded: list<string>(d.excluded) }
+  const nonces = d.nonces && typeof d.nonces === 'object' && !Array.isArray(d.nonces) ? d.nonces : {}
+  return { ...blank(), ...d, safes: safes.length ? safes : [''], owners: list<OwnerRow>(d.owners), excluded: list<string>(d.excluded), nonces }
 }
 const keyOf = (f: { chainId: number; safe: string }) => `${f.chainId}:${f.safe}`
 
@@ -61,7 +65,7 @@ const S = {
   mode: 'compose' as 'compose' | 'batch', stage: 1 as Stage,
   d: asDraft(store.get<Partial<Draft>>('safesync:draft', {})),
   found: [] as Pick[], looking: new Set<string>(), lines: '', sourceNote: '', loadingSource: false,
-  preparing: false, prepared: [] as Prepared[], errors: [] as string[], names: {} as Record<string, Address>, link: '',
+  preparing: false, prepared: [] as Prep[], errors: [] as string[], names: {} as Record<string, Address>, link: '',
   batch: null as Batch | null, id: '', rows: [] as Row[], loadError: '', pasted: '',
   wallets: [] as Wallet[], provider: null as any, account: null as Address | null, choosing: false,
   delegations: {} as Record<string, svc.Delegation[]>, lookingUp: 0, // keyed "account:chainId"
@@ -289,34 +293,51 @@ async function prepare() {
     const names = await resolveNames(a.actions)
     if (my !== run) return
     S.names = names
-    S.prepared = targets.map(x => ({ ...x, notes: ['checking the queue…'] }))
+    S.prepared = targets.map(x => ({ ...x, notes: [] }))
     update()
-    // The queue checks only add notes, so they go on in the background and the link doesn't wait for them.
-    await Promise.all(targets.map(async (x, i) => {
-      const p = await prepareTarget(x, a.actions, names)
-      if (my !== run) return
-      p.notes.unshift('checking the queue…')
-      S.prepared[i] = p; update()
-      checkQueue(p, my)
-    }))
+    await Promise.all(targets.map((x, i) => prepareOne(x, i, my, a.actions, names)))
   } catch (e) { if (my === run) S.errors.push(msg(e)) }
   if (my === run) { S.preparing = false; update() }
 }
 
-/** Notes transactions already queued at this nonce: the same one (its signatures count) or a competitor. */
-async function checkQueue(p: Prepared, my: number) {
-  const drop = () => (p.notes = p.notes.filter(n => n !== 'checking the queue…'))
-  if (!p.tx || p.error || !svc.serviceUrl(p.chainId)) return void drop()
-  try {
-    const q = await svc.queued(p.chainId, p.safe, p.tx.nonce)
-    drop()
-    if (q.some(o => o.safeTxHash === p.hash)) p.notes.push('already queued in Safe{Wallet}; its signatures count')
-    else if (q.some(o => o.nonce === p.tx!.nonce)) p.notes.push(`⚠ another transaction is queued at nonce ${p.tx.nonce}`)
-  } catch (e) { drop(); p.notes.push(`queue check failed: ${msg(e)}`) }
-  if (my === run) update()
+/** Builds one Safe's transaction. What's already queued decides its nonce, so nothing queued is replaced unless chosen. */
+async function prepareOne(x: Target, i: number, my: number, actions: Action[], names: Record<string, Address>) {
+  let queue: Queued[] = []
+  const p: Prep = await prepareTarget(x, actions, names, async tx => {
+    // A chain without a Safe service has no queue to read: the on-chain nonce it is.
+    if (svc.serviceUrl(tx.chainId)) queue = await svc.queued(tx.chainId, tx.safe, tx.nonce).catch(e => { throw new Error(`Couldn't read the queue: ${msg(e)}`) })
+    return pickNonce(tx, queue, S.d.nonces[keyOf(x)] ?? 'after').nonce
+  })
+  if (my !== run) return
+  p.queue = queue; p.same = !!p.tx && queue.some(q => q.nonce === p.tx!.nonce && q.safeTxHash.toLowerCase() === p.hash)
+  S.prepared[i] = p; update()
 }
 
-const prepKind = (p: Prepared) => (p.error ? 'attention' : p.skip ? 'synced' : p.tx ? 'ready' : 'loading')
+function retryPrepare(i: number) {
+  const x = { chainId: S.prepared[i].chainId, safe: S.prepared[i].safe } // only the target: nothing from the failed try carries over
+  S.prepared[i] = { ...x, notes: [] }; S.link = ''; S.copied = ''; update()
+  prepareOne(x, i, run, actionsFor().actions, S.names)
+}
+
+/** Something other than this transaction is queued, so the proposer picks: go after it, or replace it. */
+const queuedAhead = (p: Prep) => !!p.tx && !p.error && !p.same && !!p.queue?.length
+const choiceOf = (p: Prep) => S.d.nonces[keyOf(p)] ?? 'after'
+
+/** Redoes only this Safe: its nonce, hash and on-chain hash check. The link is made again afterwards. */
+async function chooseNonce(p: Prep, choice: NonceChoice) {
+  S.d.nonces[keyOf(p)] = choice; store.set('safesync:draft', S.d)
+  const nonce = pickNonce({ ...p.tx!, nonce: p.state!.nonce }, p.queue ?? [], choice).nonce
+  if (nonce === p.tx!.nonce) return update()
+  const tx = { ...p.tx!, nonce }, hash = safeTxHash(tx)
+  p.tx = tx; p.hash = hash; p.checking = true; S.link = ''; S.copied = ''; update()
+  const onchain = await onchainHash(tx).catch(e => e)
+  if (p.tx !== tx) return // chosen again meanwhile
+  p.checking = false
+  if (onchain !== hash) p.error = typeof onchain === 'string' ? `Hash mismatch: local ${hash}, on-chain ${onchain}` : `Couldn't check the hash: ${msg(onchain)}`
+  update()
+}
+
+const prepKind = (p: Prep) => (p.error ? 'attention' : p.skip ? 'synced' : p.tx && !p.checking ? 'ready' : 'loading')
 
 /** Builds the link (once per Review) and copies it; the button itself says "Copied". */
 async function copyLink() {
@@ -894,13 +915,24 @@ function changeStage() {
   </section>`
 }
 
+/** After the queue (the default) or replacing what's queued at the on-chain nonce: the proposer's call, per Safe. */
+function nonceSelect(p: Prep) {
+  const choice = choiceOf(p), after = pickNonce({ ...p.tx!, nonce: p.state!.nonce }, p.queue!, 'after').nonce
+  return html`<span class=${`select small ${choice === 'replace' ? 'warn' : ''}`} @click=${(e: Event) => e.stopPropagation()}>
+    <select aria-label=${`Nonce on ${chainName(p.chainId)}`} @change=${(e: any) => chooseNonce(p, e.target.value)}>
+      <option value="after" .selected=${choice === 'after'}>Nonce ${after} · after ${p.queue!.length} queued</option>
+      <option value="replace" .selected=${choice === 'replace'}>Nonce ${p.state!.nonce} · replace</option>
+    </select>
+  </span>`
+}
+
 function reviewStage() {
   const by = (k: string) => S.prepared.filter(p => prepKind(p) === k)
   const ready = by('ready'), synced = by('synced'), attention = by('attention'), loading = by('loading')
-  const queueing = S.prepared.filter(p => p.notes.includes('checking the queue…')).length
   const labels = Object.fromEntries(Object.entries(S.names).map(([n, a]) => [a.toLowerCase(), n]))
   const items: Item[] = ready.map(p => ({ tx: p.tx!, owners: p.state?.owners, threshold: p.state?.threshold }))
-  const except = exceptions(items)
+  const except = exceptions(items), flagged = S.prepared.filter(queuedAhead)
+  const allChoose = (c: NonceChoice, label: string) => html`<button class=${flagged.every(p => choiceOf(p) === c) ? 'seg on' : 'seg'} @click=${() => flagged.forEach(p => chooseNonce(p, c))}>${label}</button>`
   return html`<section class="card">
     ${!S.prepared.length ? html`<div class="muted">${S.preparing || S.looking.size ? 'Checking every Safe…' : ''}</div>` : html`
     <div class="summary">
@@ -910,31 +942,36 @@ function reviewStage() {
       ${loading.length ? html` · <span class="muted">${loading.length} checking…</span>` : nothing}
     </div>
     ${ready.length ? reviewView(items, labels) : nothing}
-    <div class="scroll"><table class="list"><tbody>${S.prepared.map(p => {
-      const k = prepKind(p), notes = p.notes.filter(x => x !== 'checking the queue…')
+    ${flagged.length > 1 ? html`<div class="row queue-bar"><span class="grow">Queued ahead on ${plural(flagged.length, 'Safe')}</span><span class="segs">${allChoose('after', 'After queue')}${allChoose('replace', 'Replace')}</span></div>` : nothing}
+    <div class="scroll"><table class="list"><tbody>${S.prepared.map((p, i) => {
+      const k = prepKind(p), notes = p.notes
       const only = p.tx ? except(ready.indexOf(p)) : ''
       const key = keyOf(p), open = !!p.tx && S.open.has(key)
       const toggle = () => { if (!p.tx) return; open ? S.open.delete(key) : S.open.add(key); update() }
-      return html`<tr class=${p.tx ? 'click' : ''} @click=${toggle}>
+      return html`<tr class=${`${p.tx ? 'click' : ''} ${queuedAhead(p) ? 'has-sub' : ''}`} @click=${toggle}>
         <td class="ico-cell">${k === 'ready' ? mark('todo', 'Needs signatures') : k === 'synced' ? mark('idle', 'Already in sync', '–') : k === 'attention' ? mark('warn', p.error ?? 'Needs attention', '!') : mark('load', 'Checking this Safe…')}</td>
         <td>${chainChip(p.chainId)}</td>
         <td>${safeAddr(p.chainId, p.safe, labels)}</td>
         <td class="grow-cell small">
-          ${p.error ? html`<span class="bad">${p.error}</span>` : p.skip ? html`<span class="muted">${p.skip}</span>` : nothing}
+          ${p.error ? html`<span class="bad">${p.error}</span> <button class="ghost retry" aria-label="Try again" @click=${(e: Event) => { e.stopPropagation(); retryPrepare(i) }}>↻</button>` : p.skip ? html`<span class="muted">${p.skip}</span>` : nothing}
+          ${p.same ? html`<span class="muted">already queued; its signatures count</span>` : nothing}
           ${only ? html`<span>${only}</span>` : nothing}
           ${p.sim && !p.sim.ok && !p.sim.definite ? html`<span class="warn">${p.sim.error}</span>` : nothing}
           ${notes.length ? html`<span class=${notes.some(x => x.startsWith('⚠')) ? 'warn' : 'muted'}>${notes.join('; ')}</span>` : nothing}
         </td>
         <td>${p.tx ? html`<button class="ghost disclose" aria-expanded=${open} aria-label=${`Details for ${chainName(p.chainId)}`} @click=${(e: Event) => { e.stopPropagation(); toggle() }}>${open ? '▾' : '▸'}</button>` : nothing}</td>
       </tr>
-      ${open ? html`<tr class="details"><td></td><td colspan="4">${actionsView(p.tx!, labels)}</td></tr>` : nothing}`
+      ${queuedAhead(p) ? html`<tr class="sub"><td></td><td colspan="4">${nonceSelect(p)}</td></tr>` : nothing}
+      ${open ? html`<tr class="details"><td></td><td colspan="4">
+        ${queuedAhead(p) ? html`<div class="queued small"><span class="muted">Queued</span>${p.queue!.map(q => html`<a href=${safeLink(p, q.safeTxHash)!} target="_blank" rel="noopener">nonce ${q.nonce}</a>`)}</div>` : nothing}
+        ${actionsView(p.tx!, labels)}
+      </td></tr>` : nothing}`
     })}</tbody></table></div>
     ${S.link ? html`<input readonly class="mono small" aria-label="Signing link" .value=${live(S.link)} @focus=${(e: any) => e.target.select()}>` : nothing}`}
     ${errorList()}
     ${footer(2, html`
-      ${queueing ? busyLine(`Checking Safe{Wallet} queues · ${S.prepared.length - queueing} of ${S.prepared.length}`) : nothing}
       ${S.link ? html`<a class="button" href=${S.link} data-tip="Open the link here to sign it, or propose it, so it shows up in Safe{Wallet}">Propose now</a>` : nothing}
-      ${S.preparing ? waitButton(S.prepared.length ? `Building ${S.prepared.length - loading.length} of ${S.prepared.length}…` : 'Reading every Safe…')
+      ${S.preparing || loading.length ? waitButton(S.prepared.length ? `Building ${S.prepared.length - loading.length} of ${S.prepared.length}…` : 'Reading every Safe…')
       : html`<button class=${S.copied === 'failed' ? 'bad-btn' : 'primary'} @click=${copyLink} ?disabled=${!ready.length}>${S.copied === 'yes' ? 'Copied ✓' : S.copied === 'failed' ? 'Copy failed' : 'Copy signing link'}</button>`}`)}
   </section>`
 }
