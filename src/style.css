@@ -83,7 +83,8 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .owner .actions button { padding: 4px 8px; font-weight: 500; }
 .gone { text-decoration: line-through; color: var(--muted); }
 .owner-chip { display: inline-flex; gap: 4px; align-items: center; border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; font-size: 13px; }
-.owner-chip.new { border-color: var(--good); }
+.owner-chip.in { border-color: var(--good); } .owner-chip.out { border-color: var(--bad); }
+.owner-changes { display: grid; gap: 6px; }
 .segs { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; padding: 2px; gap: 2px; }
 .seg { border: 0; background: transparent; color: var(--muted); padding: 6px 12px; }
 .seg.on { background: var(--active); color: var(--fg); }

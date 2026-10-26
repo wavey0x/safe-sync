@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { getAddress, hashTypedData, type Address, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import {
-  applyOps, batchId, buildCalls, ownerOps, decodeBatch, describe, encodeBatch, linesFromTx, linesFromTxBuilder, normalizeSig, packMultiSend, packSigs,
+  applyOps, ownerDiff, batchId, buildCalls, ownerOps, decodeBatch, describe, encodeBatch, linesFromTx, linesFromTxBuilder, normalizeSig, packMultiSend, packSigs,
   parseActions, parseTargets, payloadKey, safeTxHash, sigOwner, unpackMultiSend, walletTypedData, type Tx,
 } from '../src/safe'
 
@@ -185,4 +185,16 @@ test('owner operations are read back and applied in their order: add C, then rep
   expect(after.owners).toEqual([d, a, b].map(x => x.toLowerCase()))
   expect(after.owners).toEqual(built.owners.map(x => x.toLowerCase())) // what the Safe ends up with
   expect(ownerOps({ ...tx, data: packMultiSend([...built.calls, { to: a, value: 0n, data: '0x' }]) })).toBeNull()
+})
+
+test('the owner change pairs each swap with its replacement, through chains, and leaves plain adds and removes', () => {
+  const [a, b, c, d, e, f] = ['0xa', '0xb', '0xc', '0xd', '0xe', '0xf'].map(v => v.padEnd(42, '1'))
+  const ops = [
+    { kind: 'swap' as const, old: a, new: c }, { kind: 'swap' as const, old: c, new: d }, // a → c → d: one swap, a for d
+    { kind: 'add' as const, owner: e, threshold: 2 }, { kind: 'remove' as const, owner: b, threshold: 2 },
+  ]
+  const after = applyOps([a, b, f], 2, ops).owners
+  expect(ownerDiff([a, b, f], after, ops)).toEqual({ swaps: [[a, d]], added: [e], removed: [b], kept: [f] })
+  // Add C, then swap C for D: just an add of D.
+  expect(ownerDiff([a], [d, a], [{ kind: 'add', owner: c, threshold: 1 }, { kind: 'swap', old: c, new: d }])).toEqual({ swaps: [], added: [d], removed: [], kept: [a] })
 })

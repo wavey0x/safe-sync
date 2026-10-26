@@ -5,7 +5,7 @@ import { live } from 'lit-html/directives/live.js'
 import { getAddress, isAddress, toHex, type Address, type Hex } from 'viem'
 import { CHAINS } from './chains'
 import {
-  applyOps, batchId, chainName, chainOf, client, config, decodeBatch, describe, domainHash, encodeBatch, execData, findSafe, linesFromTx,
+  applyOps, ownerDiff, batchId, chainName, chainOf, client, config, decodeBatch, describe, domainHash, encodeBatch, execData, findSafe, linesFromTx,
   linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, prepareTarget, readSafe, resolveNames,
   ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, short, sigOwner, walletTypedData,
   type Action, type Batch, type Found, type OwnerOp, type Prepared, type Step, type Tx,
@@ -648,16 +648,22 @@ function reviewView(items: Item[], labels: Record<string, string>) {
   if (ops.some(o => !o) || items.some(i => i.failed)) return generic()
   // "On all Safes" is only claimed once every Safe's current owners are known.
   if (items.some(i => !i.owners || i.threshold === undefined)) return html`<div class="change"><div class="muted small">Reading every Safe…</div></div>`
-  const known = items
-  const after = known.map((i, k) => (i.done ? { owners: i.owners!.map(o => o.toLowerCase()), threshold: i.threshold! } : applyOps(i.owners!, i.threshold!, ops[k]!)))
+  const after = items.map((i, k) => (i.done ? { owners: i.owners!.map(o => o.toLowerCase()), threshold: i.threshold! } : applyOps(i.owners!, i.threshold!, ops[k]!)))
   const sig = (a: { owners: string[]; threshold: number }) => `${[...a.owners].sort().join()}|${a.threshold}`
   if (new Set(after.map(sig)).size !== 1) return generic()
-  const final = after[0], first = known.find(i => !i.done) ?? known[0], before = first.owners!.map(o => o.toLowerCase())
-  const removed = before.filter(o => !final.owners.includes(o))
+  // Described from the change most Safes make; a Safe that differs says so on its row.
+  const final = after[0], texts = items.map((i, k) => (i.done ? '' : changeText(ops[k]!, i.threshold)))
+  const first = items[texts.indexOf(mostCommon(texts.filter(Boolean)) ?? '')] ?? items[0], before = first.owners!.map(o => o.toLowerCase())
+  const d = ownerDiff(before, final.owners, first.done ? [] : ops[items.indexOf(first)]!)
+  const chip = (o: string, cls = '', badge: unknown = nothing) => html`<span class=${`owner-chip ${cls}`}>${addr(getAddress(o), labels)}${badge}</span>`
   return html`<div class="change">
-    <div class="muted small">Owners after, on all ${plural(items.length, 'Safe')}</div>
-    <div class="chips">${final.owners.map(o => html`<span class=${`owner-chip ${before.includes(o) ? '' : 'new'}`}>${addr(getAddress(o), labels)}${before.includes(o) ? nothing : html` <b class="good">added</b>`}</span>`)}</div>
-    ${removed.length ? html`<div class="chips"><span class="muted small">Removed</span>${removed.map(o => html`<span class="owner-chip gone">${addr(getAddress(o), labels)}</span>`)}</div>` : nothing}
+    <div class="muted small">On all ${plural(items.length, 'Safe')}</div>
+    ${d.swaps.length + d.added.length + d.removed.length ? html`<div class="owner-changes">
+      ${d.swaps.map(([o, n]) => html`<div class="chips">${chip(o, 'out')}<span class="muted">→</span>${chip(n, 'in')}</div>`)}
+      ${d.added.map(o => html`<div class="chips">${chip(o, 'in', html` <b class="good">added</b>`)}</div>`)}
+      ${d.removed.map(o => html`<div class="chips">${chip(o, 'out', html` <b class="bad">removed</b>`)}</div>`)}
+    </div>` : nothing}
+    ${d.kept.length ? html`<div class="chips"><span class="muted small">Unchanged</span>${d.kept.map(o => chip(o))}</div>` : nothing}
     <div class="result">${final.threshold} of ${final.owners.length} signatures needed${first.threshold !== final.threshold || before.length !== final.owners.length ? html` <span class="muted">(was ${first.threshold} of ${before.length})</span>` : nothing}</div>
   </div>`
 }
