@@ -483,7 +483,7 @@ function status(r: Row): { kind: Kind; text: string; detail?: string } {
   if (r.execHash) return { kind: 'waiting', text: 'executing…' }
   const n = validSigs(r).length, t = r.threshold!
   if (n >= t) return r.chainNonce === r.tx.nonce ? { kind: 'ready', text: 'ready to execute' } : { kind: 'waiting', text: `signed; nonce ${r.chainNonce} must execute first` }
-  return { kind: 'collecting', text: `${n === 0 && r.proposed ? 'proposed · ' : ''}${n} of ${t} signatures` }
+  return { kind: 'collecting', text: `${n === 0 && r.proposed ? 'proposed, ' : ''}${n} of ${t} signatures` }
 }
 const needsWork = (r: Row) => ['collecting', 'ready', 'waiting'].includes(status(r).kind)
 const loadingRow = (r: Row) => status(r).kind === 'loading' || r.svc === 'loading'
@@ -760,9 +760,9 @@ const argValue = (v: string, labels: Record<string, string>) => (isAddress(v) ? 
 /** Every decoded field, for the technical view. */
 function steps(list: Step[], labels: Record<string, string>) {
   return html`<ol class="steps">${list.map(s => html`<li>
-    <b>${s.target === 'self' ? 'this Safe' : addr(s.target, labels)}</b> · <span class="fn">${s.fn}</span>
+    <span class="fn">${s.fn}</span> <span class="muted">on</span> <b>${s.target === 'self' ? 'this Safe' : addr(s.target, labels)}</b>
     ${s.op === 1 ? html`<span class="bad"> DELEGATECALL</span>` : nothing}
-    ${s.value ? html` · value ${s.value.toString()} wei` : nothing}
+    ${s.value ? html` <span class="muted">with</span> ${s.value.toString()} wei` : nothing}
     ${s.args.length ? html`<div class="args">${s.args.map(([k, v]) => html`<div><span class="muted">${k}</span> ${argValue(v, labels)}</div>`)}</div>` : nothing}
     ${s.raw ? html`<div class="mono small wrap">${s.raw}</div>` : nothing}
   </li>`)}</ol>`
@@ -784,7 +784,7 @@ function intent(s: Step, labels: Record<string, string>, cur: { t?: number }): {
   const a = Object.fromEntries(s.args)
   const who = (x: string, cls: string) => html`<span class=${cls}>${addr(x, labels)}</span>`
   const threshold = (n: number) => { const was = cur.t; cur.t = n; return was === n ? '' : was === undefined ? `threshold ${n}` : `threshold ${was} → ${n}` }
-  const note = (t: string) => (t ? html` <span class="muted">· ${t}</span>` : nothing)
+  const note = (t: string) => (t ? html`<span class="muted aside">${t}</span>` : nothing)
   if (s.target === 'self' && s.op === 0) {
     if (s.fn === 'swapOwner') return { key: `swap ${a.oldOwner} ${a.newOwner}`, verb: 'Swap', view: html`${who(a.oldOwner, 'out')} <span class="muted">→</span> ${who(a.newOwner, 'in')}` }
     if (s.fn === 'addOwnerWithThreshold') { const t = threshold(Number(a._threshold)); return { key: `add ${a.owner} ${t}`, verb: 'Add', view: html`${who(a.owner, 'in')}${note(t)}` } }
@@ -887,7 +887,7 @@ function safesBody() {
       : a && S.looking.has(a) ? html`<div class="small busy"><i class="spin"></i>Searching every chain…</div>`
       : a && !list.length ? html`<div class="small bad">Not found on any chain</div>` : nothing}
       ${ok.length ? html`<div class="chips">${ok.map(f => html`<button class=${`pick ${f.selected ? 'on' : ''} ${differs(f) ? 'drift' : ''}`} aria-pressed=${f.selected}
-        data-tip=${`${chainName(f.chainId)} · ${fmt([f.state!.threshold, f.state!.owners.length])}${differs(f) ? ' · different owners' : ''}`}
+        data-tip=${`${chainName(f.chainId)}, ${fmt([f.state!.threshold, f.state!.owners.length])}${differs(f) ? ', different owners' : ''}`}
         @click=${() => toggle(f)}>${f.selected ? '✓ ' : ''}${chainOf(f.chainId)?.short ?? f.chainId}</button>`)}</div>` : nothing}
       ${bad.length ? html`<div class="chips">${bad.map(f => html`<button class="pick unreachable" data-tip=${`Couldn't reach this chain: ${f.error ?? ''}. Click to try again.`} @click=${() => retry(f)}>${chainOf(f.chainId)?.short ?? f.chainId} ↻</button>`)}</div>` : nothing}
     </div>`
@@ -976,8 +976,8 @@ function nonceSelect(p: Prep) {
   const choice = choiceOf(p), after = pickNonce({ ...p.tx!, nonce: p.state!.nonce }, p.queue!, 'after').nonce
   return html`<span class=${`select small ${choice === 'replace' ? 'warn' : ''}`} @click=${(e: Event) => e.stopPropagation()}>
     <select aria-label=${`Nonce on ${chainName(p.chainId)}`} @change=${(e: any) => chooseNonce(p, e.target.value)}>
-      <option value="after" .selected=${choice === 'after'}>Nonce ${after} | after ${p.queue!.length} queued</option>
-      <option value="replace" .selected=${choice === 'replace'}>Nonce ${p.state!.nonce} | replace</option>
+      <option value="after" .selected=${choice === 'after'}>After queue (nonce ${after})</option>
+      <option value="replace" .selected=${choice === 'replace'}>Replace (nonce ${p.state!.nonce})</option>
     </select>
   </span>`
 }
@@ -993,9 +993,9 @@ function reviewStage() {
     ${!S.prepared.length ? html`<div class="muted">${S.preparing || S.looking.size ? 'Checking every Safe…' : ''}</div>` : html`
     <div class="summary">
       <span>${ready.length} ready to sign</span>
-      ${synced.length ? html` · <span class="muted">${synced.length} already in sync</span>` : nothing}
-      ${attention.length ? html` · <span class="bad">${attention.length} need${attention.length === 1 ? 's' : ''} attention</span>` : nothing}
-      ${loading.length ? html` · <span class="muted">${loading.length} checking…</span>` : nothing}
+      ${synced.length ? html`<span class="muted">${synced.length} already in sync</span>` : nothing}
+      ${attention.length ? html`<span class="bad">${attention.length} need${attention.length === 1 ? 's' : ''} attention</span>` : nothing}
+      ${loading.length ? html`<span class="muted">${loading.length} checking…</span>` : nothing}
     </div>
     ${ready.length ? reviewView(items, labels) : nothing}
     ${flagged.length > 1 ? html`<div class="row queue-bar"><span class="grow">Queued ahead on ${plural(flagged.length, 'Safe')}</span><span class="segs">${allChoose('after', 'After queue')}${allChoose('replace', 'Replace')}</span></div>` : nothing}
@@ -1075,9 +1075,9 @@ function progressView() {
   const involved = !!S.account && S.rows.some(r => isOwner(r, S.account) || isDelegate(r, S.account!))
   const reading = S.rows.filter(loadingRow).length, read = S.rows.length - reading
   const lookingUp = S.account && S.rows.some(r => { const lookup = S.delegations[`${S.account}:${r.tx.chainId}`]; return lookup && !lookup.data })
-  const waitText = reading ? `Reading Safes · ${read} of ${S.rows.length}` : lookingUp ? 'Checking proposer access…' : ''
-  // Nothing to do yet and still reading: that blocks the action, so its button says so (and the quiet line stays out).
-  const blocked = !!S.account && !S.signing && !yours.length && !!waitText
+  const waitText = reading ? `Reading ${read} of ${S.rows.length} Safes` : lookingUp ? 'Checking proposer access…' : ''
+  // Nothing found for you yet, and still reading: too early to say there's nothing, so the card shows the reading line alone.
+  const undecided = !yours.length && !!waitText
   const ready = S.rows.filter(r => status(r).kind === 'ready').length
   const executed = S.rows.filter(r => status(r).kind === 'executed').length
   const busy = S.signing || S.executing || S.waiting
@@ -1092,7 +1092,7 @@ function progressView() {
   : S.signing ? html`<div class="row"><b class="grow">${working} ${Math.min(done + 1, yours.length)} of ${yours.length}</b><button @click=${() => stop()}>Pause</button></div>
       ${bar}
       ${cur ? html`<div class="current">
-        <div><b>${chainName(cur.tx.chainId)}</b> · ${addr(cur.tx.safe)} · <span class="muted">${cur.phase ?? ''}</span></div>
+        <div class="spaced"><b>${chainName(cur.tx.chainId)}</b>${addr(cur.tx.safe)}<span class="muted">${cur.phase ?? ''}</span></div>
         <div class="hashes"><span class="muted">safeTxHash</span><span class="mono">${cur.hash}</span></div>
         <div class="hashes"><span class="muted">domain hash</span><span class="mono">${domainHash(cur.tx)}</span></div>
         <div class="hashes"><span class="muted">message hash</span><span class="mono">${messageHash(cur.tx)}</span></div>
@@ -1106,14 +1106,11 @@ function progressView() {
       ${notUploaded ? html`<button @click=${refresh}>Retry upload (${notUploaded})</button>` : nothing}
       ${manual.length ? html`<button @click=${() => copy(exportSigs())}>Copy signatures for ${manual.map(r => chainChip(r.tx.chainId))}</button>` : nothing}
     </div>${bar}`
-  : blocked ? html`<div class="row">
-      <span class="grow"></span>
-      ${waitButton(waitText)}
-    </div>`
-  : html`<div class="muted">${involved ? 'Nothing left for you to sign' : 'Not an owner or proposer of these Safes'}</div>`}
+  : undecided ? nothing
+  : html`<div class="muted">${involved ? 'Nothing left for you to sign' : 'Not an owner of these Safes'}</div>`}
   <div class="row small">
     <span class="muted">Executed ${executed} of ${S.rows.length}</span>
-    ${waitText && !blocked ? busyLine(waitText) : nothing}
+    ${waitText ? busyLine(waitText) : nothing}
     <span class="grow"></span>
     ${S.account && ready && !busy ? html`<button @click=${executeAll}>Execute ${ready}</button>` : nothing}
     ${S.executing ? html`<button @click=${() => stop()}>Stop</button>` : nothing}
@@ -1174,7 +1171,7 @@ function batchView() {
             <textarea class="grow mono small" rows="1" aria-label="Paste signatures" placeholder="Signatures copied from another signer" .value=${live(S.pasted)} @input=${(e: any) => { S.pasted = e.target.value; update() }}></textarea>
             <button @click=${importSigs} ?disabled=${!S.pasted.trim()}>Add</button>
           </span>` : nothing}
-          ${link ? html`<span>open in</span><span><a href=${link} target="_blank" rel="noopener">${chainOf(r.tx.chainId)?.service ? 'Safe{Wallet}' : 'explorer'}</a>${r.execHash ? html` · <a href=${`${chainOf(r.tx.chainId)?.explorer}/tx/${r.execHash}`} target="_blank" rel="noopener">execution</a>` : nothing}</span>` : nothing}
+          ${link ? html`<span>open in</span><span><a href=${link} target="_blank" rel="noopener">${chainOf(r.tx.chainId)?.service ? 'Safe{Wallet}' : 'explorer'}</a>${r.execHash ? html`<a class="aside" href=${`${chainOf(r.tx.chainId)?.explorer}/tx/${r.execHash}`} target="_blank" rel="noopener">execution</a>` : nothing}</span>` : nothing}
         </div>
       </td></tr>` : nothing}`
     })}</tbody></table></div>
