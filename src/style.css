@@ -171,6 +171,8 @@ tr.details td { background: var(--bg); cursor: auto; }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; font-size: 12.5px; } .kv > span:nth-child(odd) { color: var(--muted); }
 
 .linkbox { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; } .linkbox .small { grid-column: 1 / -1; }
-.modal { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: grid; place-items: start center; padding: 40px 16px; overflow: auto; z-index: 10; }
-.modal .card { width: min(640px, 100%); }
-.chains { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 2px 12px; font-size: 12px; margin-top: 8px; }
+
+/* Settings */
+.endpoint { display: grid; gap: 4px; padding: 6px 0; }
+.pick.text { font-family: inherit; }
+.badge { font-size: 11px; color: var(--accent); border: 1px solid currentColor; border-radius: 99px; padding: 1px 7px; white-space: nowrap; }

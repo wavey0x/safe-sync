@@ -61,6 +61,19 @@ const MULTISEND_SET = new Set([...MULTISEND_CALL_ONLY, '0xA238CBeb142c10Ef7Ad844
 
 export const config = { rpc: {} as Record<number, string> }
 
+/** What the user changed in Settings, by chain id. Everywhere else the defaults in src/chains.ts apply. */
+export type Settings = { apiKey: string; rpc: Record<number, string>; service: Record<number, string> }
+/** Saved settings, from this format or the older one ("chain url" text lines); anything unreadable is dropped. */
+export function settingsFrom(raw: any): Settings {
+  const byChain = (v: unknown): Record<number, string> => {
+    const pairs = typeof v === 'string'
+      ? v.split('\n').map(l => l.trim().split(/\s+/)).map(([k = '', url = '']) => [/^\d+$/.test(k) ? k : String(CHAINS.find(c => c.short === k.toLowerCase())?.id ?? ''), url])
+      : Object.entries(v && typeof v === 'object' ? v : {})
+    return Object.fromEntries(pairs.filter(([k, url]) => /^\d+$/.test(k) && typeof url === 'string' && /^https?:\/\/\S+$/.test(url)))
+  }
+  return { apiKey: typeof raw?.apiKey === 'string' ? raw.apiKey : '', rpc: byChain(raw?.rpc), service: byChain(raw?.service) }
+}
+
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
 export function chainOf(key: string | number): Chain | undefined {
   const k = String(key).toLowerCase()

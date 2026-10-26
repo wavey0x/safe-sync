@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { getAddress, hashTypedData, type Address, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import {
-  applyOps, pickNonce, batchId, buildCalls, ownerOps, decodeBatch, describe, encodeBatch, linesFromTx, linesFromTxBuilder, normalizeSig, packMultiSend, packSigs,
+  applyOps, pickNonce, settingsFrom, batchId, buildCalls, ownerOps, decodeBatch, describe, encodeBatch, linesFromTx, linesFromTxBuilder, normalizeSig, packMultiSend, packSigs,
   parseActions, parseTargets, payloadKey, safeTxHash, sigOwner, unpackMultiSend, walletTypedData, type Tx,
 } from '../src/safe'
 
@@ -199,4 +199,13 @@ test('the nonce never replaces a queued transaction unless chosen; the same tran
   const mine = { nonce: 6, safeTxHash: safeTxHash({ ...tx, nonce: 6 }).toUpperCase().replace('0X', '0x') as Hex }
   expect(pickNonce(tx, [other(5), mine, other(7)], 'after')).toEqual({ nonce: 6, same: true })
   expect(pickNonce(tx, [other(5), mine], 'replace')).toEqual({ nonce: 6, same: true })
+})
+
+test('saved settings read in the current format and the older text lines; anything unreadable is dropped', () => {
+  const now = { apiKey: 'k', rpc: { 10: 'https://op.example' }, service: { 100: 'https://gno.example' } }
+  expect(settingsFrom(now)).toEqual(now)
+  expect(settingsFrom({ rpc: '10 https://op.example\narb1 https://arb.example\nnonsense\n5 ftp://x', service: '', apiKey: ' ' }))
+    .toEqual({ apiKey: ' ', rpc: { 10: 'https://op.example', 42161: 'https://arb.example' }, service: {} })
+  expect(settingsFrom(null)).toEqual({ apiKey: '', rpc: {}, service: {} })
+  expect(settingsFrom({ rpc: { x: 'https://a', 1: 'not a url', 56: 42 } })).toEqual({ apiKey: '', rpc: {}, service: {} })
 })

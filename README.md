@@ -91,6 +91,11 @@ as executed.
 | Owners, threshold, nonce, executed? | The chain, through public RPCs (two per chain with failover; override them in Settings). The service returns trusted transactions at this nonce; if ours is absent or unsigned, it is looked up by hash. Queue reads include every page. |
 | Resume / retry | localStorage, keyed by safeTxHash. Every open re-reads the service and re-uploads anything it lacks. Signatures survive editing a batch into a new link. |
 
+**Settings** lists every chain with its default RPC and Safe Transaction Service. Set your own for any
+chain and it replaces the default, once it answers from your browser with the right chain (so CORS is
+checked too); clear the field to go back. A chain the app doesn't know can be added by its id. Overrides
+and the optional Safe API key stay in this browser.
+
 Safe service calls stay at 1 request/second per browser (2.5 with an API key) and back off on 429.
 The public limits are 2/s per IP, or 5/s per account with a key, and teammates behind one network or
 one key share them. Each service host keeps its own pace, so Fraxtal and Taiko don't wait behind

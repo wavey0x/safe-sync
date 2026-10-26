@@ -132,6 +132,8 @@ test.skipIf(!enabled)('Safe service rules the client depends on', async () => {
   const res = await post(8453, `/v1/multisig-transactions/${safeTxHash(tx)}/confirmations/`, { signature: await sign(tx, ACCOUNTS[0]) })
   expect(res.status).toBe(400)
   expect(await res.text()).toContain('is not an owner')
+  // Settings recognises a service by its about page.
+  expect((await (await fetch(`${sb.service.url(8453)}/api/v1/about/`)).json()).name).toBe('Safe Transaction Service')
   // Numbers come back as strings.
   const got = (await svc.getTx(8453, safeTxHash(tx)))!
   expect([typeof got.nonce, typeof got.value]).toEqual(['string', 'string'])

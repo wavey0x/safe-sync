@@ -125,9 +125,9 @@ export async function startSandbox({ basePort = 0, servicePort = 0, rps = 2, log
       ...s, chains: chains.map(({ id, rpc }) => ({ id, rpc })), rpc, service,
       serviceChains: ids,
       settings: {
-        rpc: chains.map(c => `${c.id} ${c.rpc}`).join('\n'),
-        service: ids.map(id => `${id} ${service.url(id)}`).join('\n'),
         apiKey: '',
+        rpc: Object.fromEntries(chains.map(c => [c.id, c.rpc])),
+        service: Object.fromEntries(ids.map(id => [id, service.url(id)])),
       },
       stop: () => { service.stop(); stopChains() },
     })

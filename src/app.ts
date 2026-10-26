@@ -7,7 +7,7 @@ import { CHAINS } from './chains'
 import {
   applyOps, batchId, chainName, chainOf, client, config, decodeBatch, describe, domainHash, encodeBatch, execData, findSafe, linesFromTx,
   linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, pickNonce, prepareTarget, readSafe, resolveNames,
-  ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, short, sigOwner, walletTypedData,
+  ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, settingsFrom, short, sigOwner, walletTypedData,
   type Action, type Batch, type Found, type NonceChoice, type OwnerOp, type Prepared, type Queued, type Step, type Target, type Tx,
 } from './safe'
 import * as svc from './service'
@@ -41,6 +41,8 @@ type Draft = {
   nonces: Record<string, NonceChoice> // "chainId:safe" → choice, for Safes with something else queued; 'after' unless chosen
 }
 type Pick = Found & { selected: boolean }
+type Endpoint = 'rpc' | 'service'
+type Edit = { text: string; state: 'checking' | 'saved' | 'bad'; note?: string } // a Settings field being saved
 // queue: other transactions queued at or after the on-chain nonce. same: this very transaction is one of them.
 type Prep = Prepared & { queue?: Queued[]; same?: boolean; checking?: boolean }
 type Stage = 1 | 2 | 3 // Safe, Build Txn, Review
@@ -71,7 +73,8 @@ const S = {
   wallets: [] as Wallet[], provider: null as any, account: null as Address | null, choosing: false,
   delegations: {} as Record<string, DelegationLookup>, // keyed "account:chainId"
   signing: false, executing: false, waiting: false, current: null as Row | null, open: new Set<string>(), notice: '', copied: '' as '' | 'yes' | 'failed',
-  settingsOpen: false, settingsErrors: [] as string[], settings: store.get('safesync:settings', { rpc: '', service: '', apiKey: '' }),
+  settings: settingsFrom(store.get('safesync:settings', {})), settingsOpen: !!history.state?.settings, settingsChanged: false, closing: false,
+  edits: {} as Record<string, Edit>, chainQuery: '', customOnly: false, openChain: null as number | null, addingChain: null as number | null,
 }
 
 let queued = false
@@ -114,19 +117,10 @@ document.addEventListener('focusin', e => showTip(tipTarget(e)))
 document.addEventListener('focusout', () => showTip(null))
 addEventListener('scroll', () => showTip(null), true)
 
-/** Parses "chain url" lines; returns the problems instead of silently skipping them. */
-function applySettings(): string[] {
-  const errors: string[] = []
-  const map = (text: string, what: string) => Object.fromEntries(text.split('\n').map(l => l.trim()).filter(Boolean).flatMap(l => {
-    const [k, url, extra] = l.split(/\s+/)
-    const id = /^\d+$/.test(k) ? Number(k) : CHAINS.find(c => c.short === k.toLowerCase())?.id
-    if (!id || !/^https?:\/\/\S+$/.test(url ?? '') || extra) return errors.push(`${what}: expected "chain url", got "${l}"`), []
-    return [[id, url]]
-  }))
-  config.rpc = map(S.settings.rpc, 'RPC')
-  svc.config.service = map(S.settings.service, 'Service')
-  svc.config.apiKey = S.settings.apiKey.trim()
-  return errors
+/** The user's overrides replace each chain's defaults from now on, and are kept in this browser. */
+function applySettings() {
+  config.rpc = S.settings.rpc; svc.config.service = S.settings.service; svc.config.apiKey = S.settings.apiKey.trim()
+  store.set('safesync:settings', S.settings)
 }
 applySettings()
 
@@ -1167,33 +1161,124 @@ function batchView() {
 
 // ---------------------------------------------------------------- settings & shell
 
+/** Tries an endpoint from this browser, so CORS is tested for real. Returns what's wrong, or nothing. */
+async function tryUrl(url: string, init: RequestInit, wrong: (j: any) => string | undefined): Promise<string | undefined> {
+  if (!/^https?:\/\/[^\s/]+/.test(url)) return 'Not a URL'
+  if (location.protocol === 'https:' && url.startsWith('http:') && !/^http:\/\/(localhost|127\.0\.0\.1)[:/]/.test(url)) return 'Use https:// (this page is https, so the browser blocks http://)'
+  try {
+    const res = await fetch(url, { ...init, signal: AbortSignal.timeout(8000) })
+    return res.ok ? wrong(await res.json().catch(() => null)) : `It answered ${res.status}`
+  } catch (e) { return (e as Error).name === 'TimeoutError' ? 'No answer in 8 seconds' : 'No answer: unreachable, or the browser blocked it (CORS)' }
+}
+const checkRpc = (url: string, id: number) => tryUrl(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }) },
+  j => (j?.result === undefined ? 'Not a JSON-RPC endpoint' : Number(j.result) !== id ? `That's chain ${Number(j.result)}, not ${id}` : undefined))
+const checkService = (url: string) => tryUrl(`${url}/api/v1/about/`, {}, j => (j?.name === 'Safe Transaction Service' ? undefined : 'Not a Safe Transaction Service'))
+
+const checking = new Set<Promise<unknown>>()
+/** Saves an override once it works from here; an empty field goes back to the default. */
+async function saveEndpoint(kind: Endpoint, id: number, text: string) {
+  const key = `${kind}:${id}`, url = kind === 'service' ? text.trim().replace(/\/+$/, '').replace(/\/api$/, '') : text.trim()
+  const done = (edit?: Edit) => { if (edit) S.edits[key] = edit; else delete S.edits[key]; update() }
+  if (url === (S.settings[kind][id] ?? '')) return done()
+  if (!url) { delete S.settings[kind][id]; applySettings(); S.settingsChanged = true; return done() }
+  done({ text, state: 'checking' })
+  const check = kind === 'rpc' ? checkRpc(url, id) : checkService(url)
+  checking.add(check)
+  const wrong = await check
+  checking.delete(check)
+  if (S.edits[key]?.text !== text) return // changed again meanwhile
+  if (wrong) return done({ text, state: 'bad', note: wrong })
+  S.settings[kind][id] = url; applySettings(); S.settingsChanged = true
+  done({ text: url, state: 'saved' })
+}
+
+function resetChain(id: number) {
+  delete S.settings.rpc[id]; delete S.settings.service[id]; delete S.edits[`rpc:${id}`]; delete S.edits[`service:${id}`]
+  if (!CHAINS.some(c => c.id === id)) S.openChain = S.addingChain = null
+  applySettings(); S.settingsChanged = true; update()
+}
+
+/** Settings is a page of its own: a history entry, so the browser's Back closes it too. */
+function openSettings() {
+  history.pushState({ ...history.state, settings: true }, '', location.href)
+  S.settingsOpen = true; S.settingsChanged = false; update(); scrollTo(0, 0)
+}
+/** Done right after typing a URL waits for its check: it closes once saved, or stays open to say what's wrong. */
+async function closeSettings() {
+  if (checking.size) {
+    S.closing = true; update(); await Promise.all(checking); S.closing = false
+    if (Object.values(S.edits).some(e => e.state === 'bad')) return update()
+  }
+  if (history.state?.settings) history.back(); else settingsClosed()
+}
+function settingsClosed() {
+  S.settingsOpen = false; S.edits = {}; S.openChain = S.addingChain = null
+  if (S.settingsChanged && S.mode === 'batch') refresh() // read every Safe again through the new endpoints
+  S.settingsChanged = false; update()
+}
+
+function endpointField(kind: Endpoint, id: number, defaults: string[]) {
+  const e = S.edits[`${kind}:${id}`], saved = S.settings[kind][id]
+  const host = (u: string) => { try { return new URL(u).host } catch { return u } }
+  const about = defaults.length ? `${saved ? 'Replaces' : 'Default:'} ${defaults.map(host).join(' · ')}` : ''
+  return html`<label class="endpoint">
+    <span class="small muted">${kind === 'rpc' ? 'RPC' : 'Safe Transaction Service'}</span>
+    <input class="mono small" spellcheck="false" autocomplete="off" placeholder=${defaults[0] ?? (kind === 'rpc' ? 'https://…' : 'None')}
+      .value=${live(e?.text ?? saved ?? '')} @change=${(ev: any) => saveEndpoint(kind, id, ev.target.value)}>
+    ${e?.state === 'checking' ? html`<span class="small muted">Checking…</span>`
+    : e?.state === 'bad' ? html`<span class="small bad">${e.note}</span>`
+    : html`<span class="small muted">${e?.state === 'saved' ? html`<span class="good">Saved.</span> ` : nothing}${about}</span>`}
+  </label>`
+}
+
 function settingsView() {
-  const set = (k: 'rpc' | 'service' | 'apiKey') => (e: any) => (S.settings[k] = e.target.value)
-  return html`<div class="modal" @click=${(e: Event) => e.target === e.currentTarget && ((S.settingsOpen = false), update())}><section class="card">
-    <h3>Settings</h3>
-    <label><span>RPCs</span><textarea rows="4" spellcheck="false" placeholder="1 https://…\narb1 https://…" .value=${live(S.settings.rpc)} @input=${set('rpc')}></textarea></label>
-    <label><span>Safe Transaction Services</span><textarea rows="2" spellcheck="false" placeholder="167000 https://…" .value=${live(S.settings.service)} @input=${set('service')}></textarea></label>
-    <label><span>Safe API key</span><input .value=${live(S.settings.apiKey)} @input=${set('apiKey')} placeholder="Optional"></label>
-    ${S.settingsErrors.length ? html`<div class="errors">${S.settingsErrors.map(e => html`<div>${e}</div>`)}</div>` : nothing}
-    <div class="row"><span class="grow"></span><button class="primary" @click=${() => {
-      S.settingsErrors = applySettings()
-      if (!S.settingsErrors.length) { store.set('safesync:settings', S.settings); S.settingsOpen = false; if (S.mode === 'batch') refresh() }
-      update()
-    }}>Save</button></div>
-    <details><summary>Supported chains (${CHAINS.length})</summary>
-      <div class="chains">${CHAINS.map(c => html`<div><span class="chip">${c.short}</span> ${c.id} ${c.name}${!c.service ? html` <span class="muted">(no service)</span>` : !c.service.url.startsWith('https://api.safe.global/') ? html` <span class="muted">(service at ${new URL(c.service.url).host})</span>` : nothing}</div>`)}</div>
-    </details>
-  </section></div>`
+  const known = new Set(CHAINS.map(c => c.id)), custom = (id: number) => !!(S.settings.rpc[id] || S.settings.service[id])
+  const added = [...new Set([...Object.keys(S.settings.rpc), ...Object.keys(S.settings.service)].map(Number))].filter(id => !known.has(id))
+  const ids = [...known, ...added, ...(S.addingChain && !known.has(S.addingChain) && !added.includes(S.addingChain) ? [S.addingChain] : [])]
+  const q = S.chainQuery.trim().toLowerCase(), customized = ids.filter(custom).length
+  const matches = (id: number) => { const c = CHAINS.find(c => c.id === id); return !q || String(id) === q || !!c && (c.short.toLowerCase().includes(q) || c.name.toLowerCase().includes(q)) }
+  const shown = ids.filter(id => matches(id) && (!S.customOnly || custom(id) || id === S.addingChain))
+  const addable = /^[1-9]\d{0,15}$/.test(q) && !ids.includes(Number(q))
+  const row = (id: number) => {
+    const c = CHAINS.find(c => c.id === id), open = S.openChain === id, name = c?.name ?? `Chain ${id}`
+    const toggle = () => { S.openChain = open ? null : id; update() }
+    return html`<tr class="click" @click=${toggle}>
+      <td>${chainChip(id)}</td>
+      <td class="grow-cell">${name}</td>
+      <td>${custom(id) ? html`<span class="badge">${c ? 'Custom' : 'Added'}</span>` : nothing}</td>
+      <td><button class="ghost disclose" aria-expanded=${open} aria-label=${`Settings for ${name}`} @click=${(e: Event) => { e.stopPropagation(); toggle() }}>${open ? '▾' : '▸'}</button></td>
+    </tr>
+    ${open ? html`<tr class="details"><td colspan="4">
+      ${endpointField('rpc', id, c?.rpcs ?? [])}
+      ${endpointField('service', id, c?.service ? [c.service.url] : [])}
+      ${custom(id) ? html`<button class="ghost" @click=${() => resetChain(id)}>${c ? 'Reset to default' : 'Remove'}</button>` : nothing}
+    </td></tr>` : nothing}`
+  }
+  return html`<section class="card">
+    <div class="row"><h2 class="grow">Settings</h2><button class="primary" ?disabled=${S.closing} @click=${closeSettings}>${S.closing ? 'Checking…' : 'Done'}</button></div>
+    <label class="endpoint">
+      <span class="small muted">Safe API key</span>
+      <input class="mono small" spellcheck="false" autocomplete="off" placeholder="Optional: raises Safe's rate limits" .value=${live(S.settings.apiKey)}
+        @change=${(e: any) => { S.settings.apiKey = e.target.value.trim(); applySettings(); S.settingsChanged = true; update() }}>
+    </label>
+    <div class="row">
+      <input class="grow" type="search" placeholder="Search chains" aria-label="Search chains" .value=${live(S.chainQuery)} @input=${(e: any) => { S.chainQuery = e.target.value; update() }}>
+      ${customized ? html`<button class=${`pick text ${S.customOnly ? 'on' : ''}`} aria-pressed=${S.customOnly} @click=${() => { S.customOnly = !S.customOnly; update() }}>Customized ${customized}</button>` : nothing}
+    </div>
+    <div class="scroll"><table class="list"><tbody>${shown.map(row)}</tbody></table></div>
+    ${addable ? html`<div><button class="ghost" @click=${() => { S.addingChain = S.openChain = Number(q); S.customOnly = false; update() }}>+ Add chain ${q}</button></div>`
+    : !shown.length ? html`<div class="small muted">No chain matches "${S.chainQuery.trim()}"</div>` : nothing}
+    ${customized ? html`<div class="row"><span class="grow"></span><button class="ghost" @click=${() => { S.settings.rpc = {}; S.settings.service = {}; S.edits = {}; S.addingChain = null; applySettings(); S.settingsChanged = true; update() }}>Reset all to defaults</button></div>` : nothing}
+  </section>`
 }
 
 function view(): TemplateResult {
   return html`
   <header>
     <a class="brand grow" href=${location.pathname + location.search} @click=${(e: Event) => { e.preventDefault(); if (S.mode === 'compose') return void (S.stage > 1 && goTo(1)); history.pushState({ stage: 1 }, '', location.pathname + location.search); route() }}>Safe Sync</a>
-    <button class="ghost" @click=${() => { S.settingsOpen = true; update() }}>Settings</button>
+    ${S.settingsOpen ? nothing : html`<button class="ghost" @click=${openSettings}>Settings</button>`}
   </header>
-  <main class=${S.mode === 'compose' ? 'narrow' : ''}>${S.mode === 'batch' ? batchView() : composeView()}</main>
-  ${S.settingsOpen ? settingsView() : nothing}`
+  <main class=${S.settingsOpen || S.mode === 'compose' ? 'narrow' : ''}>${S.settingsOpen ? settingsView() : S.mode === 'batch' ? batchView() : composeView()}</main>`
 }
 
 function route() {
@@ -1206,7 +1291,11 @@ function route() {
 }
 // Leaving a link fires both events: each one handles its own direction, so a move routes once.
 window.addEventListener('hashchange', () => { if (location.hash) route() })
-window.addEventListener('popstate', () => { if (!location.hash) route() })
+window.addEventListener('popstate', () => {
+  if (S.settingsOpen && !history.state?.settings) settingsClosed()
+  S.settingsOpen = !!history.state?.settings
+  if (!location.hash) route(); else update()
+})
 // Signatures are kept in localStorage and re-uploaded on the next visit; only warn mid-session, or while a proposal
 // (whose signature isn't kept) is still uploading.
 window.addEventListener('beforeunload', e => { if (S.signing || S.executing || S.waiting || S.rows.some(r => r.proposing)) e.preventDefault() })
