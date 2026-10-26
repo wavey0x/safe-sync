@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { getAddress, hashTypedData, type Address, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import {
-  applyOps, batchId, buildCalls, ownerOps, decodeBatch, describe, encodeBatch, linesFromTx, linesFromTxBuilder, normalizeSig, packMultiSend, packSigs,
+  applyOps, pickNonce, batchId, buildCalls, ownerOps, decodeBatch, describe, encodeBatch, linesFromTx, linesFromTxBuilder, normalizeSig, packMultiSend, packSigs,
   parseActions, parseTargets, payloadKey, safeTxHash, sigOwner, unpackMultiSend, walletTypedData, type Tx,
 } from '../src/safe'
 
@@ -185,4 +185,18 @@ test('owner operations are read back and applied in their order: add C, then rep
   expect(after.owners).toEqual([d, a, b].map(x => x.toLowerCase()))
   expect(after.owners).toEqual(built.owners.map(x => x.toLowerCase())) // what the Safe ends up with
   expect(ownerOps({ ...tx, data: packMultiSend([...built.calls, { to: a, value: 0n, data: '0x' }]) })).toBeNull()
+})
+
+test('the nonce never replaces a queued transaction unless chosen; the same transaction keeps its nonce', () => {
+  const tx: Tx = { chainId: 1, safe: ORIGINAL, nonce: 5, to: ORIGINAL, value: '0', data: '0x', operation: 0 }
+  const other = (nonce: number) => ({ nonce, safeTxHash: `0x${String(nonce).padStart(64, '0')}` as Hex })
+  expect(pickNonce(tx, [], 'after')).toEqual({ nonce: 5 })
+  expect(pickNonce(tx, [other(5), other(6)], 'after')).toEqual({ nonce: 7 })
+  expect(pickNonce(tx, [other(5), other(6)], 'replace')).toEqual({ nonce: 5 })
+  expect(pickNonce(tx, [other(5), other(8)], 'after')).toEqual({ nonce: 9 }) // after the last one, not into a gap
+  expect(pickNonce(tx, [other(3)], 'after')).toEqual({ nonce: 5 }) // below the on-chain nonce: already used up
+  // Someone already queued this exact transaction at 6: keep it, whatever the choice.
+  const mine = { nonce: 6, safeTxHash: safeTxHash({ ...tx, nonce: 6 }).toUpperCase().replace('0X', '0x') as Hex }
+  expect(pickNonce(tx, [other(5), mine, other(7)], 'after')).toEqual({ nonce: 6, same: true })
+  expect(pickNonce(tx, [other(5), mine], 'replace')).toEqual({ nonce: 6, same: true })
 })

@@ -99,6 +99,12 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .select select { appearance: none; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 7px; padding: 5px 30px 5px 12px; font: inherit; font-weight: 600; cursor: pointer; }
 .select select:hover { border-color: var(--accent); } .select select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .select::after { content: ''; position: absolute; right: 12px; top: calc(50% - 5px); width: 6px; height: 6px; border: solid var(--muted); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); pointer-events: none; }
+.select.small select { padding: 3px 28px 3px 8px; font-size: 13px; font-weight: 500; } .select.small::after { right: 11px; }
+.select.warn select { color: var(--warn); border-color: var(--warn); }
+.queue-bar { flex-wrap: wrap; } .queue-bar .grow { flex: 1 0 auto; }
+tr.has-sub td { border-bottom: 0; } tr.sub td { padding-top: 0; }
+.queued { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 4px 0 2px; }
+.retry { padding: 0 6px; }
 pre { margin: 6px 0 0; white-space: pre-wrap; }
 .disclose { padding: 2px 8px; }
 
@@ -126,6 +132,7 @@ pre { margin: 6px 0 0; white-space: pre-wrap; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+@media (max-width: 520px) { td { padding-left: 4px; padding-right: 4px; } } /* every column fits on a phone, ▸ included */
 td > .mono, td > .chip { white-space: nowrap; }
 td.ico-cell { width: 28px; padding-right: 0; }
 td.grow-cell { width: 100%; }
