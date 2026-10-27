@@ -210,3 +210,14 @@ tr.details td { background: var(--bg); cursor: auto; }
 .account .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); }
 .menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20; min-width: 220px; display: grid; gap: 4px; padding: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
 .menu > button { justify-content: flex-start; }
+.wallet.in-card .menu { left: 0; right: auto; }
+/* Connect on a signing link: the header's button, with a light running around its border */
+@property --glint { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+.glint { position: relative; }
+.glint::before { content: ''; position: absolute; inset: -1px; padding: 1px; border-radius: inherit; pointer-events: none;
+  background: conic-gradient(from var(--glint), transparent 55%, var(--accent) 90%, transparent 97%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite: exclude;
+  animation: glint 3s linear infinite; }
+@keyframes glint { to { --glint: 360deg; } }
+@media (prefers-reduced-motion: reduce) { .glint::before { display: none; } .glint { border-color: var(--accent); } }

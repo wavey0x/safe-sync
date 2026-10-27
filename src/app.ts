@@ -28,6 +28,8 @@ type Row = {
   loaded?: Promise<void>; posting?: Promise<void>
 }
 type Wallet = { info: { name: string; icon: string; rdns: string }; provider: any }
+/** Where the wallet menu opens: under the header's button, or under Connect in a signing link's progress card. */
+type MenuAt = 'header' | 'card'
 type DelegationLookup = { data?: svc.Delegation[]; promise: Promise<void> }
 /** What the proposer entered. Also stored in the link, so "edit as new batch" can bring it back. */
 /** One owner in the target: `from` is who it started as (none for an added owner), `to` who it becomes (null: removed). */
@@ -70,7 +72,7 @@ const S = {
   found: [] as Pick[], looking: new Set<string>(), lines: '', sourceNote: '', loadingSource: false,
   preparing: false, prepared: [] as Prep[], errors: [] as string[], names: {} as Record<string, Address>, link: '',
   batch: null as Batch | null, id: '', rows: [] as Row[], loadError: '', pasted: '',
-  wallets: [] as Wallet[], provider: null as any, account: null as Address | null, walletMenu: false,
+  wallets: [] as Wallet[], provider: null as any, account: null as Address | null, walletMenu: false as false | MenuAt,
   delegations: {} as Record<string, DelegationLookup>, // keyed "account:chainId"
   signing: false, executing: false, waiting: false, current: null as Row | null, open: new Set<string>(), notice: '', copied: '' as '' | 'yes' | 'failed',
   settings: settingsFrom(store.get('safesync:settings', {})), settingsOpen: !!history.state?.settings, settingsChanged: false, closing: false,
@@ -526,11 +528,11 @@ function use(provider: any, account: string) {
   findDelegations(); update()
 }
 
-/** Connects the only wallet there is; with several (or none), opens the menu to pick from. */
-async function connect(w?: Wallet) {
+/** Connects the only wallet there is; with several (or none), opens the menu to pick from, under the button clicked. */
+async function connect(w?: Wallet, at: MenuAt = 'header') {
   const wallet = w ?? (S.wallets.length === 1 ? S.wallets[0] : undefined)
   const provider = wallet?.provider ?? (S.wallets.length ? undefined : (window as any).ethereum)
-  if (!provider) return void ((S.walletMenu = !S.walletMenu), update())
+  if (!provider) return void ((S.walletMenu = S.walletMenu === at ? false : at), update())
   S.walletMenu = false
   try {
     const [account] = await provider.request({ method: 'eth_requestAccounts' })
@@ -1119,7 +1121,7 @@ function progressView() {
   const bar = html`<div class="bar"><i style=${`width:${yours.length ? Math.round((done / yours.length) * 100) : 0}%`}></i></div>`
   const cur = S.current
   return html`
-  ${!S.account ? nothing
+  ${!S.account ? html`<div>${walletButton('card')}</div>`
   : S.signing ? html`<div class="row"><b class="grow">${working} ${Math.min(done + 1, yours.length)} of ${yours.length}</b><button @click=${() => stop()}>Pause</button></div>
       ${bar}
       ${cur ? html`<div class="current">
@@ -1361,13 +1363,13 @@ const walletMenu = () => html`<div class="menu" role="menu">${S.account
   : S.wallets.length ? S.wallets.map(w => html`<button class="ghost" role="menuitem" @click=${() => connect(w)}><img src=${w.info.icon} alt="">${w.info.name}</button>`)
   : html`<div class="muted small">No browser wallet found</div>`}</div>`
 
-/** The one place to connect, see the connected account, and disconnect. */
-function walletButton() {
-  return html`<span class="wallet">
+/** Connect, the connected account, and Disconnect, in the header. A signing link's progress card also offers Connect. */
+function walletButton(at: MenuAt = 'header') {
+  return html`<span class=${at === 'card' ? 'wallet in-card' : 'wallet'}>
     ${S.account
-      ? html`<button class="account" aria-haspopup="menu" aria-expanded=${S.walletMenu} @click=${() => { S.walletMenu = !S.walletMenu; update() }}><i class="dot"></i><span class="mono">${short(S.account)}</span></button>`
-      : html`<button aria-haspopup="menu" aria-expanded=${S.walletMenu} @click=${() => connect()}>Connect wallet</button>`}
-    ${S.walletMenu ? walletMenu() : nothing}
+      ? html`<button class="account" aria-haspopup="menu" aria-expanded=${S.walletMenu === at} @click=${() => { S.walletMenu = S.walletMenu === at ? false : at; update() }}><i class="dot"></i><span class="mono">${short(S.account)}</span></button>`
+      : html`<button class=${at === 'card' ? 'glint' : nothing} aria-haspopup="menu" aria-expanded=${S.walletMenu === at} @click=${() => connect(undefined, at)}>Connect wallet</button>`}
+    ${S.walletMenu === at ? walletMenu() : nothing}
   </span>`
 }
 

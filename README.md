@@ -65,7 +65,7 @@ button does what the account can:
 A ✓ appears once the Safe service lists your signature or proposal, not just when the upload was
 accepted.
 
-**Signers**: open the link, check the code next to the title with whoever sent it, connect, then click **Sign N**. The title says what the link does ("Swap 2 owners on 15 Safes").
+**Signers**: open the link, check the code next to the title with whoever sent it, connect (Connect wallet sits where **Sign N** will appear), then click **Sign N**. The title says what the link does ("Swap 2 owners on 15 Safes").
 
 - Every Safe is listed with a mark: ✓ you signed (or proposed) it, ○ it needs you, – nothing for you
   to do, ! a problem, a dashed ring for yours that isn't in the Safe service yet (yellow when the
