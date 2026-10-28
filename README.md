@@ -2,12 +2,10 @@
 
 Synchronize Safe owners on every chain. **https://safe-sync.wavey.info**
 
-A team's Safe often sits at one address on a dozen chains or more, and the chains drift apart: a
-rotation finished on some and not others, a signer removed but never replaced, a threshold changed on
-one. Fixing that by hand means working out what each chain has, building a different transaction for
-each, and having every signer click through every chain in Safe{Wallet}.
+A Safe on many chains drifts over time: its owners and threshold stop matching. Fixing it by hand means
+a different transaction for every chain, and every signer clicking through each one.
 
-Safe Sync does all of that for you:
+Safe Sync does it for you:
 
 - **Diffs the owners.** It reads every chain and compares each Safe's owners and threshold with one
   target.
@@ -18,7 +16,8 @@ Safe Sync does all of that for you:
   open it, connect and click **Sign N**, then confirm one wallet prompt per Safe, with no clicking
   through Safe{Wallet} chain by chain.
 
-It's one static HTML file: no server, no database, no accounts.
+It's a stateless web app: the signing link carries the transactions, and each chain's Safe Transaction
+Service tracks signatures and status.
 
 ### 1. See the drift
 
