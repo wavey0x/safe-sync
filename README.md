@@ -1,6 +1,6 @@
 # Safe Sync
 
-The same Safe owners on every chain. **https://safe-sync.wavey.info**
+Synchronize Safe owners on every chain. **https://safe-sync.wavey.info**
 
 A team's Safe often sits at one address on a dozen chains or more, and the chains drift apart: a
 rotation finished on some and not others, a signer removed but never replaced, a threshold changed on
