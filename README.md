@@ -7,9 +7,18 @@ rotation finished on some and not others, a signer removed but never replaced, a
 one. Fixing that by hand means working out what each chain has, building a different transaction for
 each, and having every signer click through every chain in Safe{Wallet}.
 
-Safe Sync does it in one pass. It reads every chain, builds the transaction each Safe needs to reach
-one target, and collects every signature through a single link. It's one static HTML file: no server,
-no database, no accounts.
+Safe Sync does all of that for you:
+
+- **Diffs the owners.** It reads every chain and compares each Safe's owners and threshold with one
+  target.
+- **Plans the calldata.** Each Safe gets exactly the calls it's missing: swaps, adds, removes, a
+  threshold change. Every transaction is simulated on its chain and its hash checked against the Safe
+  contract.
+- **Keeps clicks to a minimum.** The proposer goes through three screens and shares one link. Signers
+  open it, connect and click **Sign N**, then confirm one wallet prompt per Safe, with no clicking
+  through Safe{Wallet} chain by chain.
+
+It's one static HTML file: no server, no database, no accounts.
 
 ### 1. See the drift
 
@@ -35,8 +44,7 @@ swap, add or remove owners from there.
 
 Each Safe is compared with the target on its own and gets only the calls it's missing. Here base was
 half rotated, bnb had dropped a signer without adding the new one, mantle had an extra owner and arb1
-a lower threshold. Linea already matches, so it's skipped. Every transaction is simulated on its chain
-and its hash checked against the Safe contract.
+a lower threshold. Linea already matches, so it's skipped.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/3-review-dark.png">
@@ -46,9 +54,8 @@ and its hash checked against the Safe contract.
 ### 4. Sign it in one sitting
 
 Copy the signing link and send it to the other signers. Each one checks the fingerprint next to the
-title with whoever sent it, connects a wallet and clicks **Sign 13**: one wallet prompt per Safe, no
-clicking through Safe{Wallet} chain by chain. Signatures go to the Safe Transaction Service, so
-Safe{Wallet} shows them too.
+title with whoever sent it, connects a wallet and clicks **Sign 13**. Signatures go to the Safe
+Transaction Service, so Safe{Wallet} shows them too.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/4-sign-dark.png">
