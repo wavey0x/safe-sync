@@ -57,6 +57,8 @@ button:disabled { opacity: .45; cursor: default; }
 .nowrap { white-space: nowrap; }
 .chip + .chip { margin-left: 4px; }
 .chip { display: inline-block; background: var(--chip); border-radius: 5px; padding: 0 6px; font-size: 12px; font-family: var(--mono); white-space: nowrap; }
+/* A chain's logo before its name, with a faint ring so dark logos keep their edge on a dark chip */
+.logo { width: 14px; height: 14px; border-radius: 50%; vertical-align: -3px; margin-right: 4px; box-shadow: 0 0 0 1px color-mix(in srgb, var(--fg) 10%, transparent); }
 /* A Safe's signatures, "2/5", over one dash per signature its threshold needs (--t); outlined once proposed */
 .count { position: relative; display: inline-block; min-width: min(calc(var(--t) * 6px + 12px), 96px); text-align: center; background: var(--chip); border-radius: 5px; padding: 0 7px 4px; font-size: 12px; font-family: var(--mono); white-space: nowrap; }
 .count.proposed { box-shadow: inset 0 0 0 1px var(--accent); }
@@ -85,6 +87,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .pick.on { background: var(--active); border-color: var(--accent); color: var(--fg); }
 .pick.drift { border-color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn); }
 .pick.unreachable { color: var(--warn); border-style: dashed; }
+.pick:not(.on) .logo { filter: grayscale(1); opacity: .5; } /* a chain left out */
 .swap { display: flex; gap: 8px; align-items: center; min-width: 0; } .swap input { flex: 1; min-width: 0; }
 .owners { display: grid; gap: 4px; }
 .owner .add { grid-column: span 2; }
@@ -185,7 +188,7 @@ button:disabled:has(.spin) { opacity: .75; cursor: progress; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-@media (max-width: 520px) { td { padding-left: 4px; padding-right: 4px; } } /* every column fits on a phone, chevron included */
+@media (max-width: 520px) { td { padding-left: 3px; padding-right: 3px; } td .chip { padding: 0 4px; } td .logo { margin-right: 3px; } } /* every column fits on a phone, chevron included */
 td > .mono, td > .chip { white-space: nowrap; }
 td.ico-cell { width: 28px; padding-right: 0; }
 td.grow-cell { width: 100%; }

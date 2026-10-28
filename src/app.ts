@@ -4,6 +4,7 @@ import { html, nothing, render, type TemplateResult } from 'lit-html'
 import { live } from 'lit-html/directives/live.js'
 import { getAddress, isAddress, toHex, type Address, type Hex } from 'viem'
 import { CHAINS } from './chains'
+import { LOGO } from './logos'
 import {
   applyOps, batchId, chainName, chainOf, client, config, decodeBatch, describe, domainHash, encodeBatch, execData, findSafe, linesFromTx,
   linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, pickNonce, prepareTarget, readSafe, resolveNames,
@@ -747,7 +748,9 @@ const disclose = (open: boolean, label: string, toggle: () => void) => html`<but
 /** An address: short, the full one in its tooltip, with a copy button and its label (an ENS name) if it has one. */
 const addr = (a: string, labels: Record<string, string> = S.batch?.labels ?? {}, cls = 'mono') =>
   html`<span class="addr"><span class=${cls} data-tip=${a}>${short(a)}</span>${copyButton(a)}</span>${labels[a.toLowerCase()] ? html` <span class="label">(${labels[a.toLowerCase()]})</span>` : nothing}`
-const chainChip = (id: number) => html`<span class="chip" data-tip=${chainName(id)}>${chainOf(id)?.short ?? id}</span>`
+/** A chain's round logo, when it's one the app knows. */
+const logo = (id: number) => (LOGO[id] ? html`<img class="logo" src=${LOGO[id]} alt="">` : nothing)
+const chainChip = (id: number) => html`<span class="chip" data-tip=${chainName(id)}>${logo(id)}${chainOf(id)?.short ?? id}</span>`
 const safeLink = (tx: { chainId: number; safe: string }, hash?: string) => {
   const c = chainOf(tx.chainId), s = c?.service
   if (s) return `${s.app}/${hash ? `transactions/tx?safe=${s.prefix}:${tx.safe}&id=multisig_${tx.safe}_${hash}` : `transactions/queue?safe=${s.prefix}:${tx.safe}`}`
@@ -903,8 +906,8 @@ function safesBody() {
       : a && !list.length ? html`<div class="small bad">Not found on any chain</div>` : nothing}
       ${ok.length ? html`<div class="chips">${ok.map(f => html`<button class=${`pick ${f.selected ? 'on' : ''} ${differs(f) ? 'drift' : ''}`} aria-pressed=${f.selected}
         data-tip=${`${chainName(f.chainId)}, ${fmt([f.state!.threshold, f.state!.owners.length])}${differs(f) ? ', different owners' : ''}`}
-        @click=${() => toggle(f)}>${f.selected ? '✓ ' : ''}${chainOf(f.chainId)?.short ?? f.chainId}</button>`)}</div>` : nothing}
-      ${bad.length ? html`<div class="chips">${bad.map(f => html`<button class="pick unreachable" data-tip=${`Couldn't reach this chain: ${f.error ?? ''}. Click to try again.`} @click=${() => retry(f)}>${chainOf(f.chainId)?.short ?? f.chainId} ↻</button>`)}</div>` : nothing}
+        @click=${() => toggle(f)}>${f.selected ? '✓ ' : ''}${logo(f.chainId)}${chainOf(f.chainId)?.short ?? f.chainId}</button>`)}</div>` : nothing}
+      ${bad.length ? html`<div class="chips">${bad.map(f => html`<button class="pick unreachable" data-tip=${`Couldn't reach this chain: ${f.error ?? ''}. Click to try again.`} @click=${() => retry(f)}>${logo(f.chainId)}${chainOf(f.chainId)?.short ?? f.chainId} ↻</button>`)}</div>` : nothing}
     </div>`
   }
   return html`
