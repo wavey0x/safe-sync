@@ -8,6 +8,7 @@
     "sandbox": "bun scripts/build.ts && bun test/sandbox.ts",
     "sandbox:simple": "bun scripts/build.ts && bun test/sandbox.ts --simple",
     "sandbox:fast": "bun scripts/build.ts && bun test/sandbox.ts --fast",
+    "screenshots": "bun scripts/build.ts && bun scripts/screenshots.ts",
     "test": "bun test"
   },
   "dependencies": {

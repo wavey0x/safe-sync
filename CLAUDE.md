@@ -15,3 +15,8 @@
 ## Tests
 
 - When a feature goes, its tests go in the same commit.
+
+## README screenshots
+
+- `bun run screenshots` retakes `docs/*.png` from the sandbox in headless Chrome (about 10 s). Run it
+  when a screen they show changes, and commit them with that change.
