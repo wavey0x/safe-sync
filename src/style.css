@@ -151,6 +151,7 @@ pre { margin: 6px 0 0; white-space: pre-wrap; }
 tr:hover .disclose, .disclose[aria-expanded=true] { color: var(--fg); background: var(--chip); }
 /* A row's own refresh: shown on hover or focus (always on touch screens), gone while it can't be used */
 .row-actions { white-space: nowrap; text-align: right; }
+button.exec { padding: 1px 10px; font-size: 13px; color: var(--good); }
 .refresh { padding: 2px 6px; opacity: 0; } .refresh:hover:not(:disabled) { color: var(--fg); }
 tr:hover .refresh, .refresh:focus-visible { opacity: 1; }
 .refresh:disabled { visibility: hidden; }

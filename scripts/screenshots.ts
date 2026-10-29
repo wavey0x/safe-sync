@@ -147,8 +147,8 @@ try {
   // Enough signatures: anyone executes.
   await post(OWNERS[5], false); await post(OWNERS[7], false)
   await go(link)
-  await until(`[...document.querySelectorAll('button')].some(b => /^Execute \\d/.test(b.textContent.trim()))`, 'Execute')
-  await click('Execute')
+  await until(`[...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Queue all executions' && !b.disabled)`, 'Queue all executions')
+  await click('Queue all executions')
   await until(`/Executed ${txs.length} of ${txs.length}/.test(document.body.innerText)`, 'every execution')
 
   // 5. Afterwards: the same Safe, the same owners everywhere.

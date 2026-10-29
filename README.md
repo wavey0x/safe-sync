@@ -63,8 +63,9 @@ Transaction Service, so Safe{Wallet} shows them too.
 
 ### 5. Execute, and every chain matches
 
-Once a Safe has enough signatures, anyone with gas clicks **Execute**. Open the Safe again afterwards
-and the amber is gone: the same owners and threshold everywhere.
+Once a Safe has enough signatures, anyone can execute it: **Execute** on its row, or **Queue all
+executions**. The wallet confirms them one at a time, and a chain where it's short of gas is left out.
+Open the Safe again afterwards and the amber is gone: the same owners and threshold everywhere.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/5-synced-dark.png">

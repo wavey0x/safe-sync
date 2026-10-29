@@ -2,7 +2,7 @@
 // All state lives in the link, the Safe Transaction Service, the chain, and localStorage.
 import { html, nothing, render, type TemplateResult } from 'lit-html'
 import { live } from 'lit-html/directives/live.js'
-import { getAddress, isAddress, toHex, type Address, type Hex } from 'viem'
+import { formatEther, getAddress, isAddress, toHex, type Address, type Hex } from 'viem'
 import { CHAINS } from './chains'
 import { LOGO } from './logos'
 import {
@@ -32,6 +32,8 @@ type Wallet = { info: { name: string; icon: string; rdns: string }; provider: an
 /** Where the wallet menu opens: under the header's button, under Connect in a signing link's progress card, or in a footer. */
 type MenuAt = 'header' | 'card' | 'footer'
 type DelegationLookup = { data?: svc.Delegation[]; promise: Promise<void> }
+/** Whether the connected wallet can pay to execute: unknown (empty) when the estimate fails, so execution says why. */
+type Gas = { checking?: boolean; low?: boolean; gas?: bigint; need?: bigint; have?: bigint }
 /** What the proposer entered. Also stored in the link, so "edit as new batch" can bring it back. */
 /** One owner in the target: `from` is who it started as (none for an added owner), `to` who it becomes (null: removed). */
 type OwnerRow = { from?: string; to: string | null; at?: number } // at: when it was replaced, so replacements keep that order
@@ -77,7 +79,8 @@ const S = {
   batch: null as Batch | null, id: '', rows: [] as Row[], loadError: '', pasted: '',
   wallets: [] as Wallet[], provider: null as any, account: null as Address | null, walletMenu: false as false | MenuAt,
   delegations: {} as Record<string, DelegationLookup>, // keyed "account:chainId"
-  signing: false, executing: false, waiting: false, current: null as Row | null, open: new Set<string>(), notice: '', copied: '' as '' | 'yes' | 'failed',
+  signing: false, executing: false, waiting: false, current: null as Row | null, execQueue: [] as Row[], gas: {} as Record<string, Gas>, // gas keyed "account:safeTxHash"
+  open: new Set<string>(), notice: '', copied: '' as '' | 'yes' | 'failed',
   settings: settingsFrom(store.get('safesync:settings', {})), settingsOpen: !!history.state?.settings, settingsChanged: false, closing: false,
   edits: {} as Record<string, Edit>, chainQuery: '', customOnly: false, openChain: null as number | null, addingChain: null as number | null,
   // The proposers page: its Safes (from its link), and each one's proposers keyed "chainId:safe".
@@ -748,7 +751,7 @@ const rejected = (e: any) => e?.code === 4001 || e?.cause?.code === 4001 || /rej
 
 // Each run gets an id; Pause bumps it, so an older run that wakes up after a pending request stops.
 let session = 0
-function stop(notice = '') { session++; S.signing = S.executing = false; S.notice = notice; update() }
+function stop(notice = '') { session++; S.signing = S.executing = false; S.execQueue = []; S.notice = notice; update() }
 /** One wallet request at a time; while it is pending the start buttons stay disabled, even after Pause. */
 async function ask<T>(f: () => Promise<T>): Promise<T> {
   S.waiting = true; update()
@@ -808,27 +811,57 @@ function done(my: number) {
   update()
 }
 
-async function executeAll() {
+/** What executing costs, against the wallet's balance: the estimate with a margin, at the chain's gas price. */
+async function gasCheck(r: Row, account: Address): Promise<Gas> {
+  const c = client(r.tx.chainId), data = execData(r.tx, validSigs(r), r.threshold!)
+  const [gas, price, have] = await Promise.all([
+    c.estimateGas({ account, to: r.tx.safe, data }).catch(e => { if (/insufficient funds/i.test(msg(e))) return null; throw e }),
+    c.getGasPrice(), c.getBalance({ address: account })])
+  if (gas === null) return { low: true, have }
+  const need = ((gas * 13n) / 10n) * price
+  return { low: have < need, gas, need, have }
+}
+/** The connected wallet's gas for a ready Safe, checked once when it's shown (Refresh checks again). */
+function gasFor(r: Row): Gas {
+  const account = S.account!, key = `${account}:${r.hash}`.toLowerCase()
+  if (!S.gas[key]) {
+    S.gas[key] = { checking: true }
+    gasCheck(r, account).then(g => { S.gas[key] = g }, () => { S.gas[key] = {} }).finally(update)
+  }
+  return S.gas[key]
+}
+/** Ready, and the wallet has the gas: what Queue all executions takes. */
+const executable = (r: Row) => status(r).kind === 'ready' && !!S.account && !gasFor(r).checking && !gasFor(r).low
+
+/** Executions wait their turn: the wallet gets one at a time, each on its own network. */
+function queueExecutions(rows: Row[]) {
+  for (const r of rows) if (r !== S.current && !S.execQueue.includes(r)) S.execQueue.push(r)
+  S.notice = ''
+  if (!S.executing) runExecutions()
+  update()
+}
+async function runExecutions() {
   const account = S.account!, my = ++session
-  S.executing = true; S.notice = ''; update()
+  S.executing = true; update()
   const stopped = () => my !== session || S.account !== account
-  for (const r of S.rows) {
-    if (stopped()) break
+  while (S.execQueue.length && !stopped()) {
+    const r = S.execQueue.shift()!
     if (status(r).kind !== 'ready') continue
     S.current = r
     try {
-      r.phase = 'switching network'; update()
-      await ask(() => ensureChain(r.tx.chainId))
-      const c = client(r.tx.chainId)
-      const data = execData(r.tx, validSigs(r), r.threshold!)
+      const c = client(r.tx.chainId), data = execData(r.tx, validSigs(r), r.threshold!)
       r.phase = 'simulating'; update()
       try { await c.call({ account, to: r.tx.safe, data }) } catch (e) {
         const d = revertData(e); throw new Error(`Execution would fail: ${d ? revertReason(d) : msg(e)}`)
       }
-      const gas = await c.estimateGas({ account, to: r.tx.safe, data })
+      // Checked again: an earlier execution on this chain may have spent the gas. Short, it stays out (its row says so).
+      const g = (S.gas[`${account}:${r.hash}`.toLowerCase()] = await gasCheck(r, account))
+      if (g.low || stopped()) continue
+      r.phase = 'switching network'; update()
+      await ask(() => ensureChain(r.tx.chainId))
       if (stopped()) break
       r.phase = 'confirm in your wallet'; update()
-      r.execHash = await ask(() => S.provider.request({ method: 'eth_sendTransaction', params: [{ from: account, to: r.tx.safe, data, gas: toHex((gas * 13n) / 10n) }] }))
+      r.execHash = await ask(() => S.provider.request({ method: 'eth_sendTransaction', params: [{ from: account, to: r.tx.safe, data, gas: toHex((g.gas! * 13n) / 10n) }] }))
       // Only a successful receipt counts as executed; a broadcast hash alone doesn't.
       c.waitForTransactionReceipt({ hash: r.execHash! }).then(rc => {
         if (rc.status === 'success') r.execOk = true, r.chainNonce = r.tx.nonce + 1
@@ -867,6 +900,7 @@ async function importSigs() {
 
 /** Reads one Safe again: its chain state and one Safe service request, instead of one per Safe in the link. */
 function refreshRow(r: Row) {
+  for (const k of Object.keys(S.gas)) if (k.endsWith(r.hash.toLowerCase())) delete S.gas[k]
   r.error = r.uploadError = undefined; r.svc = 'loading'; r.loaded = loadRow(r); update()
 }
 function refresh() {
@@ -1373,6 +1407,17 @@ function sigCount(r: Row, st: ReturnType<typeof status>) {
 }
 
 
+/** Ready: Execute, queued once clicked; disabled, with the wallet's balance beside it, when that won't pay for the gas. */
+function readyCell(r: Row, st: ReturnType<typeof status>) {
+  if (S.execQueue.includes(r)) return html`<span class="muted">queued</span>`
+  if (!S.account) return html`<span class="good">${st.text}</span>`
+  const g = gasFor(r), sym = chainOf(r.tx.chainId)?.symbol ?? 'ETH'
+  const amount = (v: bigint) => { const n = Number(formatEther(v)); return n < 1e-6 ? '0' : n.toLocaleString('en-US', { maximumSignificantDigits: 2 }) }
+  return html`<button class="exec" ?disabled=${g.checking || g.low || S.signing} data-tip=${g.checking ? 'Checking gas…' : nothing}
+    @click=${(e: Event) => { e.stopPropagation(); queueExecutions([r]) }}>Execute</button>${g.low ? html`<i class="small muted aside"
+    data-tip=${g.need !== undefined ? `Needs about ${amount(g.need)} ${sym} for gas` : `Not enough ${sym} for gas`}>${amount(g.have ?? 0n)} ${sym}</i>` : nothing}`
+}
+
 function progressView() {
   // An owner's work is signing; a proposer's is proposing what nobody has proposed yet.
   const signs = S.account ? S.rows.filter(r => mine(r) || canSign(r)) : []
@@ -1391,7 +1436,8 @@ function progressView() {
   const waitText = reading ? `Reading ${read} of ${S.rows.length} Safes` : lookingUp ? 'Checking proposer access…' : ''
   // Nothing found for you yet, and still reading: too early to say there's nothing, so the card shows the reading line alone.
   const undecided = !yours.length && !!waitText
-  const ready = S.rows.filter(r => status(r).kind === 'ready').length
+  const queueable = S.rows.filter(r => executable(r) && r !== S.current && !S.execQueue.includes(r))
+  const checkingGas = S.rows.some(r => status(r).kind === 'ready' && S.account && gasFor(r).checking)
   const executed = S.rows.filter(r => status(r).kind === 'executed').length
   const busy = S.signing || S.executing || S.waiting
   const pending = (r: Row) => (r.svc === 'ok' ? unshared(r) : [])
@@ -1426,7 +1472,7 @@ function progressView() {
       ${waitText ? busyLine(waitText) : nothing}
       <span class="muted">Executed ${executed} of ${S.rows.length}</span>
     </div>
-    ${S.account && ready && !busy ? html`<button @click=${executeAll}>Execute ${ready}</button>` : nothing}
+    ${queueable.length && !S.signing ? html`<button ?disabled=${checkingGas} @click=${() => queueExecutions(queueable)}>Queue all executions</button>` : nothing}
     ${S.executing ? html`<button @click=${() => stop()}>Stop</button>` : nothing}
     <button class="ghost" aria-label="Refresh" data-tip="Read every Safe again" @click=${refresh} ?disabled=${busy}>↻</button>
   </div>
@@ -1464,7 +1510,8 @@ function batchView() {
         <td>${chainChip(r.tx.chainId)}</td>
         <td>${safeAddr(r.tx.chainId, r.tx.safe, b.labels)}</td>
         <td class="grow-cell">
-          ${reading ? nothing : st.kind === 'collecting' && !(r === S.current && r.phase) ? sigCount(r, st) : html`<span class=${KIND_CLASS[st.kind]}>${r === S.current && r.phase ? r.phase : st.text}</span>`}
+          ${reading ? nothing : r === S.current && r.phase ? html`<span>${r.phase}</span>` : st.kind === 'collecting' ? sigCount(r, st) : st.kind === 'ready' ? readyCell(r, st)
+          : html`<span class=${KIND_CLASS[st.kind]}>${st.text}</span>`}
           ${conflict ? html`<span class="small warn aside" data-tip=${`Competes with another transaction at nonce ${r.tx.nonce}`}>⚠ conflict</span>` : nothing}
           ${except(S.rows.indexOf(r)) ? html`<div class="small">${except(S.rows.indexOf(r))}</div>` : nothing}
         </td>
