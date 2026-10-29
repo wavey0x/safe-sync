@@ -7,8 +7,8 @@ import { CHAINS } from './chains'
 import { LOGO } from './logos'
 import {
   applyOps, batchId, chainName, chainOf, client, config, decodeBatch, delegateHash, delegateTypedData, describe, domainHash, encodeBatch, execData,
-  findSafe, linesFromTx, linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, pickNonce, prepareTarget, readSafe,
-  resolveNames, ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, settingsFrom, short, sigOwner, totpNow, walletTypedData, ZERO,
+  findSafe, linesFromTx, linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, parseProposersPath, pickNonce, prepareTarget,
+  proposersPath, readSafe, resolveNames, ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, settingsFrom, short, sigOwner, totpNow, walletTypedData, ZERO,
   type Action, type Batch, type Found, type NonceChoice, type OwnerOp, type Prepared, type Queued, type Step, type Target, type Tx,
 } from './safe'
 import * as svc from './service'
@@ -36,7 +36,7 @@ type DelegationLookup = { data?: svc.Delegation[]; promise: Promise<void> }
 /** One owner in the target: `from` is who it started as (none for an added owner), `to` who it becomes (null: removed). */
 type OwnerRow = { from?: string; to: string | null; at?: number } // at: when it was replaced, so replacements keep that order
 type Draft = {
-  safes: string[]; mode: 'owners' | 'replicate' | 'proposers' // safes: one address per field, first is the main Safe
+  safes: string[]; mode: 'owners' | 'replicate' // safes: one address per field, first is the main Safe
   // The target, copied once from a Safe and then only edited: never recomputed from what the chains hold now.
   owners: OwnerRow[]; threshold: number | null; startedFrom: string // startedFrom: "chainId:safe"
   excluded: string[] // "chainId:safe" of chains left out
@@ -65,12 +65,12 @@ const asDraft = (d: Omit<Partial<Draft>, 'safes'> & { safes?: unknown }): Draft 
   const safes = typeof d.safes === 'string' ? (d.safes.match(/0x[0-9a-fA-F]{40}/g) ?? []) : Array.isArray(d.safes) ? d.safes.map(String) : []
   const list = <T>(v: unknown): T[] => (Array.isArray(v) ? v : [])
   const nonces = d.nonces && typeof d.nonces === 'object' && !Array.isArray(d.nonces) ? d.nonces : {}
-  return { ...blank(), ...d, safes: safes.length ? safes : [''], owners: list<OwnerRow>(d.owners), excluded: list<string>(d.excluded), nonces }
+  return { ...blank(), ...d, mode: d.mode === 'replicate' ? 'replicate' : 'owners', safes: safes.length ? safes : [''], owners: list<OwnerRow>(d.owners), excluded: list<string>(d.excluded), nonces }
 }
 const keyOf = (f: { chainId: number; safe: string }) => `${f.chainId}:${f.safe}`
 
 const S = {
-  mode: 'compose' as 'compose' | 'batch', stage: 1 as Stage,
+  mode: 'compose' as 'compose' | 'batch' | 'proposers', stage: 1 as Stage,
   d: asDraft(store.get<Partial<Draft>>('safesync:draft', {})),
   found: [] as Pick[], looking: new Set<string>(), lines: '', sourceNote: '', loadingSource: false,
   preparing: false, prepared: [] as Prep[], errors: [] as string[], names: {} as Record<string, Address>, link: '',
@@ -80,7 +80,8 @@ const S = {
   signing: false, executing: false, waiting: false, current: null as Row | null, open: new Set<string>(), notice: '', copied: '' as '' | 'yes' | 'failed',
   settings: settingsFrom(store.get('safesync:settings', {})), settingsOpen: !!history.state?.settings, settingsChanged: false, closing: false,
   edits: {} as Record<string, Edit>, chainQuery: '', customOnly: false, openChain: null as number | null, addingChain: null as number | null,
-  proposers: {} as Record<string, ProposerRead>, // keyed "chainId:safe"
+  // The proposers page: its Safes (from its link), and each one's proposers keyed "chainId:safe".
+  pSafes: [] as Found[], pErrors: [] as string[], proposers: {} as Record<string, ProposerRead>,
   newProposer: { address: '', label: '' }, proposerRun: null as { delegate: string; text: string } | null, proposerAdded: false,
   delegateSigs: {} as Record<string, { totp: number; sig: Hex }>, // keyed "account:delegate", lowercase: one signature per hour
 }
@@ -231,30 +232,25 @@ const validOwner = (s: string) => isAddress(s) || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.e
 
 // ---------------------------------------------------------------- compose: stages
 
-/** Build Txn needs a selected Safe; Review also needs a complete change. Proposers need no transaction, so no Review. */
-const reachable = (n: Stage) => n === 1 || (selected().length > 0 && (n === 2 || (S.d.mode !== 'proposers' && !actionsFor().errors.length)))
+/** Build Txn needs a selected Safe; Review also needs a complete change. */
+const reachable = (n: Stage) => n === 1 || (selected().length > 0 && (n === 2 || !actionsFor().errors.length))
 
 /** Each move is a browser history entry, so the browser's Back and Forward step through the stages too. */
 function goTo(n: Stage) {
-  if (n === 3 && S.d.mode === 'proposers') return
   if (n === 3) { const a = actionsFor(); if (a.errors.length) return void ((S.errors = a.errors), update()) }
   if (n > 1 && !selected().length) return
   // Stepping back to the stage we came from is the browser's Back, so history doesn't fill with repeats.
   if (n < S.stage && history.state?.prev === n) return history.back()
   history.pushState({ stage: n, prev: S.stage }, '', location.pathname + location.search)
   S.stage = n; S.errors = []
-  if (n === 2 && S.d.mode === 'proposers') loadProposers(true)
   resume(); update(); scrollTo(0, 0)
 }
 
-/** Once the Safes are found (again): no Safe selected sends you back to Safe, Review builds its results, Proposers reads. */
+/** Once the Safes are found (again): no Safe selected sends you back to Safe, and Review builds its results. */
 function resume() {
   if (S.mode !== 'compose' || S.looking.size) return
-  const back = (n: Stage) => { S.stage = n; history.replaceState({ stage: n }, '', location.pathname + location.search); update() }
-  if (S.stage > 1 && !selected().length) back(1)
-  else if (S.stage === 3 && S.d.mode === 'proposers') back(2)
+  if (S.stage > 1 && !selected().length) { S.stage = 1; history.replaceState({ stage: 1 }, '', location.pathname + location.search); update() }
   else if (S.stage === 3 && !S.prepared.length && !S.preparing) prepare()
-  else if (S.stage === 2 && S.d.mode === 'proposers') loadProposers()
 }
 
 // ---------------------------------------------------------------- compose: replicate a transaction
@@ -285,34 +281,51 @@ async function loadSource() {
   edited()
 }
 
-// ---------------------------------------------------------------- compose: proposers
+// ---------------------------------------------------------------- proposers
 
 // Proposers (Safe{Wallet} delegates) live in each chain's Safe service, not on chain: an owner adds or removes one with
-// a signature, no transaction, and one signature serves every chain (delegateTypedData).
+// a signature, no transaction, and one signature serves every chain (delegateTypedData). Their page is a link of its own,
+// #proposers/eth,base:0xSafe, so whoever sets the Safes up can send it to an owner who adds them.
 const eq = (a?: string | null, b?: string | null) => !!a && !!b && a.toLowerCase() === b.toLowerCase()
-const owns = (f: Pick, a?: Address | null) => !!f.state?.owners.some(o => eq(o, a))
-/** Selected Safes on chains with a Safe service: the only ones that can have proposers. */
-const withService = () => selected().filter(f => svc.serviceUrl(f.chainId))
+const owns = (f: Found, a?: Address | null) => !!f.state?.owners.some(o => eq(o, a))
+/** The page's Safes that are read and have a Safe service: the only ones that can have proposers. */
+const withService = () => S.pSafes.filter(f => f.state && svc.serviceUrl(f.chainId))
+const proposersLink = (targets: Target[]) => `${location.href.split('#')[0]}#${proposersPath(targets)}`
+
+/** Opens a proposers link. Safes this page already found aren't read again. */
+function openProposers(path: string) {
+  const { targets, errors } = parseProposersPath(path)
+  S.mode = 'proposers'; S.pErrors = errors; S.errors = []
+  S.pSafes = targets.map(t => S.found.find(f => keyOf(f) === keyOf(t) && f.state) ?? { ...t })
+  for (const f of S.pSafes) if (!f.state) readOne(f)
+  loadProposers(true)
+  update(); scrollTo(0, 0)
+}
+/** The Safe's owners on one chain: who may add a proposer, and whose proposers count. */
+function readOne(f: Found) {
+  f.error = undefined; update()
+  readSafe(f.chainId, f.safe).then(st => { f.state = st }, e => { f.error = msg(e) }).finally(update)
+}
 
 // When a change last landed in a Safe's list: a read that started before it is older than what's shown, so it's dropped.
 const changedAt: Record<string, number> = {}
-function readProposers(f: Pick) {
+function readProposers(f: Found) {
   const k = keyOf(f), at = Date.now()
   S.proposers[k] = { list: S.proposers[k]?.list, reading: true }
   const land = (p: ProposerRead) => { S.proposers[k] = (changedAt[k] ?? 0) >= at ? { list: S.proposers[k]?.list } : p }
   return svc.proposers(f.chainId, f.safe).then(list => land({ list }), e => land({ error: msg(e) })).finally(update)
 }
-/** Each selected Safe's proposers: read on the way in (`again`), the last list shown meanwhile. */
-function loadProposers(again = false) { for (const f of withService()) if (again || !S.proposers[keyOf(f)]) readProposers(f) }
+/** Each Safe's proposers, while its owners are read: again on the way in, the last list shown meanwhile. */
+function loadProposers(again = false) { for (const f of S.pSafes) if (svc.serviceUrl(f.chainId) && (again || !S.proposers[keyOf(f)])) readProposers(f) }
 
 /** As the service decides: named by a current owner, not expired. Any other can't propose, so it isn't shown. */
-const proposersOf = (f: Pick) => (S.proposers[keyOf(f)]?.list ?? []).filter(d => owns(f, d.delegator) && (!d.expiryDate || Date.parse(d.expiryDate) > Date.now()))
+const proposersOf = (f: Found) => (S.proposers[keyOf(f)]?.list ?? []).filter(d => owns(f, d.delegator) && (!d.expiryDate || Date.parse(d.expiryDate) > Date.now()))
 
-type ProposerRow = { delegate: Address; label: string; by: Address[]; on: Pick[]; missing: Pick[] }
-/** Every proposer of the selected Safes, with the Safes it isn't one of yet: the most widespread first. */
+type ProposerRow = { delegate: Address; label: string; by: Address[]; on: Found[]; missing: Found[] }
+/** Every proposer of the page's Safes, with the Safes it isn't one of yet: the most widespread first. */
 function proposerRows(): ProposerRow[] {
   const read = withService().filter(f => S.proposers[keyOf(f)]?.list)
-  const rows = new Map<string, { delegate: Address; labels: string[]; by: Address[]; on: Pick[] }>()
+  const rows = new Map<string, { delegate: Address; labels: string[]; by: Address[]; on: Found[] }>()
   for (const f of read) for (const d of proposersOf(f)) {
     const r = rows.get(d.delegate.toLowerCase()) ?? { delegate: d.delegate, labels: [], by: [], on: [] }
     r.labels.push(d.label)
@@ -324,7 +337,7 @@ function proposerRows(): ProposerRow[] {
     .sort((a, b) => b.on.length - a.on.length || a.label.localeCompare(b.label))
 }
 /** Only an owner adds a proposer. Removing takes the owner who added it, or the proposer itself. */
-const addable = (missing: Pick[]) => missing.filter(f => owns(f, S.account))
+const addable = (missing: Found[]) => missing.filter(f => owns(f, S.account))
 const removable = (r: ProposerRow) => r.on.filter(f => proposersOf(f).some(d => eq(d.delegate, r.delegate) && (eq(d.delegator, S.account) || eq(d.delegate, S.account))))
 
 /** The one signature that adds or removes `delegate` on every chain, kept for the hour it's made in. */
@@ -341,7 +354,7 @@ async function delegateSig(account: Address, delegate: Address): Promise<Hex> {
  * Adds `delegate` with `label` to each Safe, or (label null) removes it. One wallet signature, then each chain's Safe service
  * in parallel (each service host keeps its own pace). Each Safe's list changes as its service answers.
  */
-async function changeProposer(delegate: Address, label: string | null, targets: Pick[]): Promise<boolean> {
+async function changeProposer(delegate: Address, label: string | null, targets: Found[]): Promise<boolean> {
   const account = S.account!, verb = label === null ? 'Removing' : 'Adding'
   const run = (S.proposerRun = { delegate: delegate.toLowerCase(), text: 'Confirm in your wallet' })
   S.errors = []; update()
@@ -372,7 +385,7 @@ async function changeProposer(delegate: Address, label: string | null, targets: 
 
 const typedProposer = () => { const a = S.newProposer.address.trim(); return isAddress(a) ? getAddress(a) : undefined }
 /** Adds the typed proposer to every Safe the connected owner owns that doesn't have it yet. */
-async function addTyped(targets: Pick[]) {
+async function addTyped(targets: Found[]) {
   if (!(await changeProposer(typedProposer()!, S.newProposer.label.trim(), targets))) return
   S.newProposer = { address: '', label: '' }; S.proposerAdded = true; update()
   setTimeout(() => { S.proposerAdded = false; update() }, 2500)
@@ -1063,17 +1076,32 @@ function replicateEditor() {
 function proposerCoverage(r: ProposerRow) {
   if (!r.missing.length) return nothing
   // With more than one Safe address, a chain can appear twice: its tooltip says which Safe.
-  const of = new Set(withService().map(f => f.safe)).size > 1 ? (f: Pick) => ` of ${short(f.safe)}` : () => ''
-  const chips = (list: Pick[], cls: string, tip: (f: Pick) => string) => list.map(f => html`<span class=${cls} data-tip=${tip(f)}>${logo(f.chainId)}${chainOf(f.chainId)?.short ?? f.chainId}</span>`)
+  const of = new Set(withService().map(f => f.safe)).size > 1 ? (f: Found) => ` of ${short(f.safe)}` : () => ''
+  const chips = (list: Found[], cls: string, tip: (f: Found) => string) => list.map(f => html`<span class=${cls} data-tip=${tip(f)}>${logo(f.chainId)}${chainOf(f.chainId)?.short ?? f.chainId}</span>`)
   return r.on.length < r.missing.length
     ? html`<span class="where"><span class="muted small">only on</span>${chips(r.on, 'chip', f => `A proposer${of(f)} on ${chainName(f.chainId)}`)}</span>`
     : html`<span class="where"><span class="muted small">not on</span>${chips(r.missing, 'chip missing', f => `Not a proposer${of(f)} on ${chainName(f.chainId)}${S.account && !owns(f, S.account) ? ", and you're not an owner there" : ''}`)}</span>`
 }
 
+/**
+ * The page's Safes, one line per address: a chain chip each, dimmed without a Safe service (no proposers there), spinning
+ * while its owners are read, and ↻ if they couldn't be.
+ */
+function proposerSafes() {
+  const chip = (f: Found) => {
+    const name = html`${logo(f.chainId)}${chainOf(f.chainId)?.short ?? f.chainId}`
+    if (f.error) return html`<button class="pick unreachable" data-tip=${`Couldn't read this Safe: ${f.error}. Click to try again.`} @click=${() => readOne(f)}>${name} ↻</button>`
+    if (!f.state) return html`<span class="chip" data-tip=${`Reading ${chainName(f.chainId)}…`}><i class="spin"></i> ${chainOf(f.chainId)?.short ?? f.chainId}</span>`
+    if (!svc.serviceUrl(f.chainId)) return html`<span class="chip off" data-tip=${`${chainName(f.chainId)} has no Safe service, so no proposers`}>${name}</span>`
+    return html`<span class="chip" data-tip=${`${chainName(f.chainId)}, ${fmt([f.state.threshold, f.state.owners.length])}`}>${name}</span>`
+  }
+  return html`<div class="p-safes">${[...new Set(S.pSafes.map(f => f.safe))].map(safe => html`<div class="spaced">${addr(safe, {})}<span class="chips">${S.pSafes.filter(f => f.safe === safe).map(chip)}</span></div>`)}</div>`
+}
+
 function proposersEditor() {
   const safes = withService(), rows = proposerRows(), run = S.proposerRun, busy = !!run || S.waiting
-  const unread = safes.filter(f => { const p = S.proposers[keyOf(f)]; return !p || (p.reading && !p.list && !p.error) })
-  const failed = safes.filter(f => S.proposers[keyOf(f)]?.error), none = selected().filter(f => !svc.serviceUrl(f.chainId))
+  const unread = S.pSafes.filter(f => { if (!svc.serviceUrl(f.chainId) || f.error) return false; const p = S.proposers[keyOf(f)]; return !f.state || !p || (p.reading && !p.list && !p.error) })
+  const failed = safes.filter(f => S.proposers[keyOf(f)]?.error), total = S.pSafes.filter(f => svc.serviceUrl(f.chainId) && !f.error).length
   const by = (r: ProposerRow) => `Added by ${r.by.map(a => (eq(a, S.account) ? 'you' : short(a))).join(', ')}`
   const typed = S.newProposer.address.trim(), delegate = typedProposer()
   return html`
@@ -1098,10 +1126,9 @@ function proposersEditor() {
     </div>
     ${typed && !delegate ? html`<div class="small bad">Not an address</div>` : nothing}
     ${delegate && rows.some(r => eq(r.delegate, delegate) && !r.missing.length) ? html`<div class="small muted">Already a proposer on every Safe</div>` : nothing}
-    ${unread.length ? busyLine(`Reading proposers on ${safes.length - unread.length} of ${safes.length} Safes`)
+    ${unread.length ? busyLine(`Reading proposers on ${total - unread.length} of ${total} Safes`)
     : !rows.length && !failed.length && safes.length ? html`<div class="small muted">No proposers yet</div>` : nothing}
-    ${failed.length ? html`<div class="chips">${failed.map(f => html`<button class="pick unreachable" data-tip=${`Couldn't read its proposers: ${S.proposers[keyOf(f)]?.error}. Click to try again.`} @click=${() => readProposers(f)}>${logo(f.chainId)}${chainOf(f.chainId)?.short ?? f.chainId} ↻</button>`)}</div>` : nothing}
-    ${none.length ? html`<div class="small muted">No Safe service, so no proposers, on ${none.map(f => chainChip(f.chainId))}</div>` : nothing}`
+    ${failed.length ? html`<div class="chips">${failed.map(f => html`<button class="pick unreachable" data-tip=${`Couldn't read its proposers: ${S.proposers[keyOf(f)]?.error}. Click to try again.`} @click=${() => readProposers(f)}>${logo(f.chainId)}${chainOf(f.chainId)?.short ?? f.chainId} ↻</button>`)}</div>` : nothing}`
 }
 
 /** Adds the typed proposer where it's missing: needs an owner's wallet, an address, a label, and every Safe read. */
@@ -1111,7 +1138,7 @@ function proposerAction() {
   if (S.proposerAdded) return html`<button class="primary" disabled>Added ✓</button>`
   if (run && run.delegate === delegate?.toLowerCase()) return waitButton(run.text)
   if (!S.account) return walletButton('footer')
-  if (safes.some(f => !S.proposers[keyOf(f)]?.list && !S.proposers[keyOf(f)]?.error)) return waitButton('Reading proposers…')
+  if (S.pSafes.some(f => !f.error && (!f.state || (svc.serviceUrl(f.chainId) && !S.proposers[keyOf(f)]?.list && !S.proposers[keyOf(f)]?.error)))) return waitButton('Reading proposers…')
   if (!safes.some(f => owns(f, S.account))) return html`<span class="muted">Not an owner of these Safes</span>`
   return html`<button class="primary" ?disabled=${!delegate || !S.newProposer.label.trim() || !targets.length || !!run || S.waiting}
     @click=${() => addTyped(targets)}>${delegate && targets.length ? `Add to ${plural(targets.length, 'Safe')}` : 'Add proposer'}</button>`
@@ -1119,7 +1146,7 @@ function proposerAction() {
 
 const STAGES = ['Safe', 'Build Txn', 'Review']
 function stageBar(stage: Stage) {
-  return html`<nav class="stages" aria-label="Steps">${(S.d.mode === 'proposers' ? ['Safe', 'Proposers'] : STAGES).map((label, i) => {
+  return html`<nav class="stages" aria-label="Steps">${STAGES.map((label, i) => {
     const n = (i + 1) as Stage
     return html`${i ? html`<span class=${`stage-line ${n <= stage ? 'done' : ''}`}></span>` : nothing}
       <button class=${`stage ${n === stage ? 'on' : n < stage ? 'done' : ''}`} aria-current=${n === stage ? 'step' : nothing}
@@ -1131,23 +1158,43 @@ const footer = (back: Stage | 0, next: TemplateResult) =>
 const errorList = () => (S.errors.length ? html`<div class="errors">${S.errors.map(e => html`<div>${e}</div>`)}</div>` : nothing)
 
 function safeStage() {
-  const n = selected().length
+  const n = selected().length, link = n ? proposersLink(selected()) : ''
   return html`<section class="card">
     ${safesBody()}
     ${footer(0, !n && S.looking.size ? waitButton('Searching every chain…')
       : html`<button class="primary" ?disabled=${!n} @click=${() => goTo(2)}>Continue${n ? ` with ${plural(n, 'Safe')}` : ''}</button>`)}
+    ${n ? html`<a class="side-link" href=${link} @click=${(e: Event) => { e.preventDefault(); history.pushState({ proposers: true }, '', link); route() }}>Set proposers</a>` : nothing}
   </section>`
 }
 
-function changeStage() {
-  const mode = (m: Draft['mode'], label: string, tip?: string) => html`<button class=${S.d.mode === m ? 'seg on' : 'seg'} aria-pressed=${S.d.mode === m} data-tip=${tip ?? nothing}
-    @click=${() => { if (m === 'proposers' && S.d.mode !== m) loadProposers(true); S.d.mode = m; S.errors = []; edited(); resume() }}>${label}</button>`
-  const proposers = S.d.mode === 'proposers'
+/** The proposers page: its Safes, their proposers, and its own link to send to an owner who adds them. */
+function proposersView() {
+  // Back to the Safes it was opened from; a link opened on its own goes to a new batch.
+  const back = () => { if (history.state?.proposers) return history.back(); history.pushState({ stage: 1 }, '', location.pathname + location.search); route() }
   return html`<section class="card">
-    <div class="row"><span class="segs">${mode('owners', 'Owners')}${mode('replicate', 'Other transaction')}${mode('proposers', 'Proposers', 'Safe{Wallet} proposers: they propose transactions, and their signature never counts')}</span></div>
-    ${S.d.mode === 'owners' ? ownersEditor() : proposers ? proposersEditor() : replicateEditor()}
+    <div class="row"><h2 class="grow">Proposers</h2>
+      <button class="ghost" data-tip="This page with these Safes, for an owner to open" @click=${() => copyProposersLink()}>${S.copied === 'yes' ? 'Copied ✓' : S.copied === 'failed' ? "Couldn't copy" : 'Copy link'}</button>
+    </div>
+    ${S.pErrors.length ? html`<div class="errors">${S.pErrors.map(e => html`<div>${e}</div>`)}</div>` : nothing}
+    ${proposerSafes()}
+    ${S.pSafes.length ? proposersEditor() : nothing}
     ${errorList()}
-    ${footer(1, proposers ? proposerAction() : S.d.mode === 'replicate' && S.loadingSource ? waitButton('Loading the transaction…')
+    <div class="footer"><button class="ghost" @click=${back}>← Back</button><span class="grow"></span>${S.pSafes.length ? proposerAction() : nothing}</div>
+  </section>`
+}
+function copyProposersLink() {
+  navigator.clipboard.writeText(proposersLink(S.pSafes)).then(() => { S.copied = 'yes' }, () => { S.copied = 'failed' }).finally(() => {
+    update(); setTimeout(() => { S.copied = ''; update() }, 1500)
+  })
+}
+
+function changeStage() {
+  const mode = (m: Draft['mode'], label: string) => html`<button class=${S.d.mode === m ? 'seg on' : 'seg'} aria-pressed=${S.d.mode === m} @click=${() => { S.d.mode = m; edited() }}>${label}</button>`
+  return html`<section class="card">
+    <div class="row"><span class="segs">${mode('owners', 'Owners')}${mode('replicate', 'Other transaction')}</span></div>
+    ${S.d.mode === 'owners' ? ownersEditor() : replicateEditor()}
+    ${errorList()}
+    ${footer(1, S.d.mode === 'replicate' && S.loadingSource ? waitButton('Loading the transaction…')
       : html`<button class="primary" ?disabled=${S.d.mode === 'replicate' && !S.lines} @click=${() => goTo(3)}>Review ${plural(selected().length, 'Safe')}</button>`)}
   </section>`
 }
@@ -1462,6 +1509,7 @@ document.addEventListener('keydown', e => {
 function settingsClosed() {
   S.settingsOpen = false; S.edits = {}; S.openChain = S.addingChain = null
   if (S.settingsChanged && S.mode === 'batch') refresh() // read every Safe again through the new endpoints
+  if (S.settingsChanged && S.mode === 'proposers') loadProposers(true)
   S.settingsChanged = false; update()
 }
 
@@ -1548,11 +1596,12 @@ function view(): TemplateResult {
     </button>`}
     ${walletButton()}
   </header>
-  <main class=${S.settingsOpen || S.mode === 'compose' ? 'narrow' : ''}>${S.settingsOpen ? settingsView() : S.mode === 'batch' ? batchView() : composeView()}</main>`
+  <main class=${S.settingsOpen || S.mode !== 'batch' ? 'narrow' : ''}>${S.settingsOpen ? settingsView() : S.mode === 'batch' ? batchView() : S.mode === 'proposers' ? proposersView() : composeView()}</main>`
 }
 
 function route() {
   const h = location.hash.slice(1)
+  if (h.startsWith('proposers')) return void openProposers(h)
   if (h) return void openBatch(h)
   S.mode = 'compose'; S.errors = []
   S.stage = ([1, 2, 3].includes(history.state?.stage) ? history.state.stage : 1) as Stage

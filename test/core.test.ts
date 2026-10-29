@@ -3,7 +3,8 @@ import { concat, encodeAbiParameters, getAddress, hashTypedData, keccak256, toHe
 import { privateKeyToAccount } from 'viem/accounts'
 import {
   applyOps, pickNonce, settingsFrom, batchId, buildCalls, ownerOps, decodeBatch, delegateHash, delegateTypedData, describe, encodeBatch, linesFromTx, linesFromTxBuilder,
-  normalizeSig, packMultiSend, packSigs, parseActions, parseTargets, payloadKey, safeTxHash, sigOwner, unpackMultiSend, walletTypedData, type Tx,
+  normalizeSig, packMultiSend, packSigs, parseActions, parseProposersPath, parseTargets, payloadKey, proposersPath, safeTxHash, sigOwner, unpackMultiSend,
+  walletTypedData, type Tx,
 } from '../src/safe'
 
 // Real proposal queued in Safe{Wallet} (Transaction Builder) on 2026-10-25 for the plan's rotation example.
@@ -58,6 +59,18 @@ test('a proposer signature is the Safe service\'s Delegate message without a cha
   const acct = privateKeyToAccount('0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d')
   const sig = await acct.signTypedData({ domain: p.domain, types, primaryType: 'Delegate', message: { ...p.message, totp: BigInt(p.message.totp) } })
   expect(await sigOwner(delegateHash(delegate, totp), sig)).toBe(acct.address)
+})
+
+test('a proposers link carries each Safe with its chains, and reads back the same Safes', () => {
+  const other = '0x7A1057E6e9093DA9C1D4C1D049609B6889fC4c67' as Address
+  const targets = [{ chainId: 1, safe: ORIGINAL }, { chainId: 8453, safe: ORIGINAL }, { chainId: 42161, safe: ORIGINAL }, { chainId: 1, safe: other }]
+  const path = proposersPath(targets)
+  expect(path).toBe(`proposers/eth,base,arb1:${ORIGINAL}/eth:${other}`)
+  expect(parseProposersPath(path)).toEqual({ targets, errors: [] })
+  // Lowercase addresses, chain ids and repeats are fine; what can't be read is said.
+  expect(parseProposersPath(`proposers/1,eth,8453:${ORIGINAL.toLowerCase()}`).targets).toEqual(targets.slice(0, 2))
+  expect(parseProposersPath(`proposers/nochain:${ORIGINAL}/eth:0x12`).errors).toEqual(['Unknown chain "nochain"', 'Expected "chain,chain:0xSafe", not "eth:0x12"'])
+  expect(parseProposersPath('proposers/').errors).toEqual(['No Safes in this link'])
 })
 
 test('prevOwner follows the owner list as it changes', () => {

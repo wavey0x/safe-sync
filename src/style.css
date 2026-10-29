@@ -104,11 +104,15 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .chip.missing { background: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 70%, transparent); }
 .swap input.label-input { flex: 0 1 32%; font-family: inherit; }
 .owner.adding { border-bottom: 0; } /* the footer's rule follows */
-.seg { white-space: nowrap; } .segs { flex-wrap: wrap; } /* three modes fit a phone; a narrower screen wraps them */
+.p-safes { display: grid; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid var(--line); } /* the proposers page's Safes */
+.chip.off { opacity: .55; } .chip.off .logo { filter: grayscale(1); } /* a chain without a Safe service: no proposers there */
+.chip .spin { width: 9px; height: 9px; border-width: 1.5px; vertical-align: -1px; }
+/* A quiet way somewhere else, under a step's main button */
+.side-link { justify-self: end; margin-top: -6px; font-size: 12.5px; color: var(--muted); text-decoration: none; }
+.side-link:hover { color: var(--accent); }
 @media (max-width: 520px) {
   .proposer { grid-template-columns: max-content minmax(0, 1fr); grid-template-areas: 'addr who' '. where' '. act'; }
   .proposer .actions { justify-content: flex-start; margin-left: -8px; }
-  .seg { padding: 6px 8px; font-size: 13px; }
 }
 /* An address: short form, then a quiet copy button that turns into a drawn check */
 .addr { display: inline-flex; align-items: center; gap: 1px; white-space: nowrap; vertical-align: middle; }

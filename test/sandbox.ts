@@ -257,7 +257,7 @@ Safe Sync sandbox: http://localhost:${server.port}
   Set up to include: different nonces, a rotation already applied on Linea, transactions already queued on Gnosis and Polygon,
   the same rotation already queued on the original Safe with one signature, and a proposer (Safe{Wallet}
   delegate of owner 2) that proposes signed but never confirms. "Not an owner" only views the link. Owner 2 also made a
-  keeper bot a proposer of the team Safe on every chain but Mantle, Fraxtal and Taiko (Build Txn → Proposers).
+  keeper bot a proposer of the team Safe on every chain but Mantle, Fraxtal and Taiko (Set proposers, under Continue).
 
   The draft is filled in: Review → Copy signing link → Propose now. Or open a ready link: http://localhost:${server.port}/link
   Choose who signs in the "Sandbox wallet" box at the bottom left. Other wallets are hidden here: these chains

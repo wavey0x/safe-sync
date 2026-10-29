@@ -125,6 +125,28 @@ export function parseTargets(text: string): { targets: Target[]; errors: string[
   return { targets, errors }
 }
 
+/** A proposers link's path, after the #: "proposers/eth,base:0xSafe/eth:0xOther", each Safe with the chains it's on. */
+export function proposersPath(targets: Target[]): string {
+  const chains = new Map<Address, string[]>()
+  for (const t of targets) chains.set(t.safe, [...(chains.get(t.safe) ?? []), chainOf(t.chainId)?.short ?? String(t.chainId)])
+  return `proposers/${[...chains].map(([safe, c]) => `${c.join(',')}:${safe}`).join('/')}`
+}
+export function parseProposersPath(path: string): { targets: Target[]; errors: string[] } {
+  const targets: Target[] = [], errors: string[] = []
+  for (const part of path.replace(/^proposers\/?/, '').split('/').filter(Boolean)) {
+    const m = part.match(/^([a-z0-9,-]+):(0x[0-9a-fA-F]{40})$/i)
+    if (!m) { errors.push(`Expected "chain,chain:0xSafe", not "${part}"`); continue }
+    const safe = getAddress(m[2].toLowerCase())
+    for (const name of m[1].split(',').filter(Boolean)) {
+      const c = chainOf(name)
+      if (!c) errors.push(`Unknown chain "${name}"`)
+      else if (!targets.some(t => t.chainId === c.id && t.safe === safe)) targets.push({ chainId: c.id, safe })
+    }
+  }
+  if (!targets.length && !errors.length) errors.push('No Safes in this link')
+  return { targets, errors }
+}
+
 export type Action =
   | { kind: 'swap'; old: string; new: string }
   | { kind: 'add'; owner: string }
