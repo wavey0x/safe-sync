@@ -1378,6 +1378,7 @@ const composeView = () => html`${stageBar(S.stage)}${S.stage === 1 ? safeStage()
 function icon(r: Row, st: ReturnType<typeof status>) {
   if (r === S.current) return mark('now', r.phase ?? 'Working on this Safe')
   if (st.kind === 'executed') return mark('done', 'Executed', '✓') // done for everyone, whoever signed
+  if (r.execHash) return mark('load', 'Executing…')
   if (st.kind === 'blocked') return mark('warn', st.detail ?? st.text, '!')
   if (r.uploadError) return mark('pending failed', r.uploadError)
   if (r.error) return mark('warn', r.error, '!')
@@ -1410,7 +1411,7 @@ function sigCount(r: Row, st: ReturnType<typeof status>) {
 
 /** Ready: Execute, queued once clicked; disabled, with the wallet's balance beside it, when that won't pay for the gas. */
 function readyCell(r: Row, st: ReturnType<typeof status>) {
-  if (S.execQueue.includes(r)) return html`<span class="muted">queued</span>`
+  if (S.execQueue.includes(r)) return html`<i class="small muted">queued</i>`
   if (!S.account) return html`<span class="good">${st.text}</span>`
   const g = gasFor(r), sym = chainOf(r.tx.chainId)?.symbol ?? 'ETH'
   const amount = (v: bigint) => { const n = Number(formatEther(v)); return n < 1e-6 ? '0' : n.toLocaleString('en-US', { maximumSignificantDigits: 2 }) }
@@ -1511,8 +1512,8 @@ function batchView() {
         <td>${chainChip(r.tx.chainId)}</td>
         <td>${safeAddr(r.tx.chainId, r.tx.safe, b.labels)}</td>
         <td class="grow-cell">
-          ${reading ? nothing : r === S.current && r.phase ? html`<span>${r.phase}</span>` : st.kind === 'collecting' ? sigCount(r, st) : st.kind === 'ready' ? readyCell(r, st)
-          : st.kind === 'executed' ? nothing : html`<span class=${KIND_CLASS[st.kind]}>${st.text}</span>`}
+          ${reading ? nothing : r === S.current && r.phase ? html`<i class="small">${r.phase}…</i>` : st.kind === 'collecting' ? sigCount(r, st) : st.kind === 'ready' ? readyCell(r, st)
+          : st.kind === 'executed' ? nothing : r.execHash ? html`<i class="small muted">${st.text}</i>` : html`<span class=${KIND_CLASS[st.kind]}>${st.text}</span>`}
           ${conflict ? html`<span class="small warn aside" data-tip=${`Competes with another transaction at nonce ${r.tx.nonce}`}>⚠ conflict</span>` : nothing}
           ${except(S.rows.indexOf(r)) ? html`<div class="small">${except(S.rows.indexOf(r))}</div>` : nothing}
         </td>
