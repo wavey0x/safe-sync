@@ -210,6 +210,7 @@ td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top
 @media (max-width: 520px) { td { padding-left: 3px; padding-right: 3px; } td .chip { padding: 0 4px; } td .logo { margin-right: 3px; } } /* every column fits on a phone, chevron included */
 td > .mono, td > .chip { white-space: nowrap; }
 td.ico-cell { width: 28px; padding-right: 0; }
+tr.done > td:not(.ico-cell) { opacity: .55; } /* executed: out of the way of what's left */
 td.grow-cell { width: 100%; }
 .list td { vertical-align: middle; }
 tr.click { cursor: pointer; } tr.click:hover td { background: color-mix(in srgb, var(--accent) 5%, transparent); }

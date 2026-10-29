@@ -1370,13 +1370,14 @@ const composeView = () => html`${stageBar(S.stage)}${S.stage === 1 ? safeStage()
 // ---------------------------------------------------------------- batch view
 
 /**
- * The connected account's checklist: ✓ the Safe service has your signature or proposal, ○ it needs you, – nothing for
- * you to do (anyone who isn't an owner or proposer only views the link). A dashed
+ * The connected account's checklist: ✓ the Safe service has your signature or proposal (or the Safe executed it: done
+ * for everyone), ○ it needs you, – nothing for you to do (anyone who isn't an owner or proposer only views the link). A dashed
  * ring is yours but not in the Safe service yet (yellow: the upload failed), ! is a problem, a thin spinner still
  * loading. The details are in each mark's tooltip.
  */
 function icon(r: Row, st: ReturnType<typeof status>) {
   if (r === S.current) return mark('now', r.phase ?? 'Working on this Safe')
+  if (st.kind === 'executed') return mark('done', 'Executed', '✓') // done for everyone, whoever signed
   if (st.kind === 'blocked') return mark('warn', st.detail ?? st.text, '!')
   if (r.uploadError) return mark('pending failed', r.uploadError)
   if (r.error) return mark('warn', r.error, '!')
@@ -1505,13 +1506,13 @@ function batchView() {
       const reading = loadingRow(r) && r !== S.current
       const conflict = !reading && r.others.some(o => !o.isExecuted) && needsWork(r)
       const toggle = () => { r.open = !r.open; update() }
-      return html`<tr class=${`click ${r === S.current ? 'active' : ''}`} @click=${toggle}>
+      return html`<tr class=${`click ${r === S.current ? 'active' : ''} ${st.kind === 'executed' ? 'done' : ''}`} @click=${toggle}>
         <td class="ico-cell">${icon(r, st)}</td>
         <td>${chainChip(r.tx.chainId)}</td>
         <td>${safeAddr(r.tx.chainId, r.tx.safe, b.labels)}</td>
         <td class="grow-cell">
           ${reading ? nothing : r === S.current && r.phase ? html`<span>${r.phase}</span>` : st.kind === 'collecting' ? sigCount(r, st) : st.kind === 'ready' ? readyCell(r, st)
-          : html`<span class=${KIND_CLASS[st.kind]}>${st.text}</span>`}
+          : st.kind === 'executed' ? nothing : html`<span class=${KIND_CLASS[st.kind]}>${st.text}</span>`}
           ${conflict ? html`<span class="small warn aside" data-tip=${`Competes with another transaction at nonce ${r.tx.nonce}`}>⚠ conflict</span>` : nothing}
           ${except(S.rows.indexOf(r)) ? html`<div class="small">${except(S.rows.indexOf(r))}</div>` : nothing}
         </td>
