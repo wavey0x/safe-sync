@@ -101,6 +101,10 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .proposer { grid-template-areas: 'addr who act' '. where where'; row-gap: 2px; }
 .proposer .who-addr { grid-area: addr; } .proposer .who { grid-area: who; min-width: 0; } .proposer .actions { grid-area: act; justify-content: flex-end; }
 .where { grid-area: where; display: flex; flex-wrap: wrap; align-items: center; gap: 3px 4px; padding-bottom: 2px; } .where .chip + .chip { margin-left: 0; }
+/* Ticking a proposer queues it for every Safe it's missing from; the footer's button adds all the ticked ones. */
+.tick { padding: 4px 8px; border-radius: 7px; font-weight: 500; color: var(--muted); cursor: pointer; white-space: nowrap; user-select: none; }
+.tick:hover, .tick.on { color: var(--fg); } .tick.on { background: var(--active); }
+.tick input { margin: 0; accent-color: var(--accent); cursor: inherit; }
 .chip.missing { background: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 70%, transparent); }
 .swap input.label-input { flex: 0 1 32%; font-family: inherit; }
 .owner.adding { border-bottom: 0; } /* the footer's rule follows */

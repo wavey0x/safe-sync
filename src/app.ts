@@ -82,7 +82,8 @@ const S = {
   edits: {} as Record<string, Edit>, chainQuery: '', customOnly: false, openChain: null as number | null, addingChain: null as number | null,
   // The proposers page: its Safes (from its link), and each one's proposers keyed "chainId:safe".
   pSafes: [] as Found[], pErrors: [] as string[], proposers: {} as Record<string, ProposerRead>,
-  newProposer: { address: '', label: '' }, proposerRun: null as { delegate: string; text: string } | null, proposerAdded: false,
+  // Ticked proposers (lowercase) and a typed new one: each goes on every Safe it's missing from, with one signature apiece.
+  picked: new Set<string>(), newProposer: { address: '', label: '' }, proposerRun: null as { delegate: string; text: string } | null, proposerAdded: false,
   delegateSigs: {} as Record<string, { totp: number; sig: Hex }>, // keyed "account:delegate", lowercase: one signature per hour
 }
 
@@ -295,7 +296,7 @@ const proposersLink = (targets: Target[]) => `${location.href.split('#')[0]}#${p
 /** Opens a proposers link. Safes this page already found aren't read again. */
 function openProposers(path: string) {
   const { targets, errors } = parseProposersPath(path)
-  S.mode = 'proposers'; S.pErrors = errors; S.errors = []
+  S.mode = 'proposers'; S.pErrors = errors; S.errors = []; S.picked = new Set()
   S.pSafes = targets.map(t => S.found.find(f => keyOf(f) === keyOf(t) && f.state) ?? { ...t })
   for (const f of S.pSafes) if (!f.state) readOne(f)
   loadProposers(true)
@@ -354,14 +355,14 @@ async function delegateSig(account: Address, delegate: Address): Promise<Hex> {
  * Adds `delegate` with `label` to each Safe, or (label null) removes it. One wallet signature, then each chain's Safe service
  * in parallel (each service host keeps its own pace). Each Safe's list changes as its service answers.
  */
-async function changeProposer(delegate: Address, label: string | null, targets: Found[]): Promise<boolean> {
+async function changeProposer(delegate: Address, label: string | null, targets: Found[], step = ''): Promise<boolean> {
   const account = S.account!, verb = label === null ? 'Removing' : 'Adding'
-  const run = (S.proposerRun = { delegate: delegate.toLowerCase(), text: 'Confirm in your wallet' })
-  S.errors = []; update()
+  const run = (S.proposerRun = { delegate: delegate.toLowerCase(), text: `${step}Confirm in your wallet` }), before = S.errors.length
+  update()
   try {
     const signature = await delegateSig(account, delegate)
     let done = 0
-    run.text = `${verb} 0 of ${targets.length}…`; update()
+    run.text = `${step}${verb} 0 of ${targets.length}…`; update()
     await Promise.all(targets.map(async f => {
       const k = keyOf(f)
       try {
@@ -376,18 +377,42 @@ async function changeProposer(delegate: Address, label: string | null, targets: 
           }
         }
       } catch (e) { S.errors.push(`${chainName(f.chainId)}: ${msg(e)}`) }
-      run.text = `${verb} ${++done} of ${targets.length}…`; update()
+      run.text = `${step}${verb} ${++done} of ${targets.length}…`; update()
     }))
   } catch (e) { S.errors.push(rejected(e) ? 'The request was rejected in your wallet.' : msg(e)) }
   S.proposerRun = null; update()
-  return !S.errors.length
+  return S.errors.length === before
 }
 
 const typedProposer = () => { const a = S.newProposer.address.trim(); return isAddress(a) ? getAddress(a) : undefined }
-/** Adds the typed proposer to every Safe the connected owner owns that doesn't have it yet. */
-async function addTyped(targets: Found[]) {
-  if (!(await changeProposer(typedProposer()!, S.newProposer.label.trim(), targets))) return
-  S.newProposer = { address: '', label: '' }; S.proposerAdded = true; update()
+/** Ticked, or typed into the new line: a typed address that's already listed ticks its row. */
+const isPicked = (r: ProposerRow) => S.picked.has(r.delegate.toLowerCase()) || eq(r.delegate, typedProposer())
+/** Where a proposer goes when it's added: the Safes it's missing from that the connected owner owns (all of them before connecting). */
+const reach = (missing: Found[]) => (S.account ? addable(missing) : missing)
+
+type PlanItem = { delegate: Address; label: string; missing: Found[] }
+/**
+ * What the page's one button does: every ticked proposer, and the typed new one, onto each Safe it's missing from.
+ * One wallet signature per proposer covers all of its Safes.
+ */
+function proposerPlan(): PlanItem[] {
+  const rows = proposerRows(), typed = typedProposer(), label = S.newProposer.label.trim()
+  const plan: PlanItem[] = rows.filter(r => isPicked(r) && r.missing.length).map(r => ({ delegate: r.delegate, label: r.label || label || 'Proposer', missing: r.missing }))
+  if (typed && label && !rows.some(r => eq(r.delegate, typed))) plan.push({ delegate: typed, label, missing: withService().filter(f => S.proposers[keyOf(f)]?.list) })
+  return plan
+}
+
+/** Adds each proposer of the plan in turn, and stops at the first that doesn't fully land: its list shows what's left. */
+async function addPlan() {
+  const plan = proposerPlan().map(p => ({ ...p, targets: addable(p.missing) })).filter(p => p.targets.length)
+  S.errors = []
+  for (const [i, p] of plan.entries()) {
+    const step = plan.length > 1 ? `${p.label} (${i + 1} of ${plan.length}): ` : ''
+    if (!(await changeProposer(p.delegate, p.label, p.targets, step))) return
+    S.picked.delete(p.delegate.toLowerCase())
+    if (eq(p.delegate, typedProposer())) S.newProposer = { address: '', label: '' }
+  }
+  S.proposerAdded = true; update()
   setTimeout(() => { S.proposerAdded = false; update() }, 2500)
 }
 
@@ -1106,15 +1131,17 @@ function proposersEditor() {
   const typed = S.newProposer.address.trim(), delegate = typedProposer()
   return html`
     <div class="owners">${rows.map(r => {
-      const add = addable(r.missing), remove = removable(r)
+      const add = reach(r.missing), remove = S.account ? removable(r) : [], key = r.delegate.toLowerCase()
+      const pick = () => { if (S.picked.has(key)) S.picked.delete(key); else S.picked.add(key); update() }
       return html`<div class="owner proposer">
         <span class="who-addr">${addr(r.delegate, {})}</span>
         <span class="who"><span data-tip=${by(r)}>${r.label || html`<span class="muted">No label</span>`}</span></span>
         ${proposerCoverage(r)}
-        <span class="actions">${run?.delegate === r.delegate.toLowerCase() ? busyLine(run.text) : S.account ? html`
-          ${add.length ? html`<button class="ghost" ?disabled=${busy} @click=${() => changeProposer(r.delegate, r.label || 'Proposer', add)}>Add to ${add.length}</button>` : nothing}
+        <span class="actions">${run?.delegate === key ? busyLine(run.text) : html`
           ${remove.length ? html`<button class="ghost" ?disabled=${busy} data-tip=${remove.length < r.on.length ? 'Another owner added it on the rest: only they can remove it there' : nothing}
-            @click=${() => changeProposer(r.delegate, null, remove)}>${remove.length < r.on.length ? `Remove from ${remove.length}` : 'Remove'}</button>` : nothing}` : nothing}</span>
+            @click=${() => { S.errors = []; changeProposer(r.delegate, null, remove) }}>${remove.length < r.on.length ? `Remove from ${remove.length}` : 'Remove'}</button>` : nothing}
+          ${add.length ? html`<label class=${`check tick ${isPicked(r) ? 'on' : ''}`} data-tip=${`Add it on ${add.map(f => chainOf(f.chainId)?.short ?? f.chainId).join(', ')}`}>
+            <input type="checkbox" .checked=${live(isPicked(r))} ?disabled=${busy || eq(r.delegate, typedProposer())} @change=${pick}>Add to ${add.length}</label>` : nothing}`}</span>
       </div>`
     })}
       <div class="owner adding">
@@ -1125,23 +1152,25 @@ function proposersEditor() {
       </div>
     </div>
     ${typed && !delegate ? html`<div class="small bad">Not an address</div>` : nothing}
-    ${delegate && rows.some(r => eq(r.delegate, delegate) && !r.missing.length) ? html`<div class="small muted">Already a proposer on every Safe</div>` : nothing}
+    ${delegate && rows.some(r => eq(r.delegate, delegate)) ? html`<div class="small muted">${rows.some(r => eq(r.delegate, delegate) && !r.missing.length) ? 'Already a proposer on every Safe' : 'Already listed, and ticked above'}</div>` : nothing}
     ${unread.length ? busyLine(`Reading proposers on ${total - unread.length} of ${total} Safes`)
     : !rows.length && !failed.length && safes.length ? html`<div class="small muted">No proposers yet</div>` : nothing}
     ${failed.length ? html`<div class="chips">${failed.map(f => html`<button class="pick unreachable" data-tip=${`Couldn't read its proposers: ${S.proposers[keyOf(f)]?.error}. Click to try again.`} @click=${() => readProposers(f)}>${logo(f.chainId)}${chainOf(f.chainId)?.short ?? f.chainId} ↻</button>`)}</div>` : nothing}`
 }
 
-/** Adds the typed proposer where it's missing: needs an owner's wallet, an address, a label, and every Safe read. */
+/** The page's one button: adds every ticked proposer, and the typed new one, wherever it's missing. */
 function proposerAction() {
-  const delegate = typedProposer(), safes = withService(), read = safes.filter(f => S.proposers[keyOf(f)]?.list), run = S.proposerRun
-  const row = delegate && proposerRows().find(r => eq(r.delegate, delegate)), targets = addable(row ? row.missing : read)
+  const safes = withService(), run = S.proposerRun, typed = typedProposer()
   if (S.proposerAdded) return html`<button class="primary" disabled>Added ✓</button>`
-  if (run && run.delegate === delegate?.toLowerCase()) return waitButton(run.text)
+  if (run) return waitButton(run.text)
   if (!S.account) return walletButton('footer')
   if (S.pSafes.some(f => !f.error && (!f.state || (svc.serviceUrl(f.chainId) && !S.proposers[keyOf(f)]?.list && !S.proposers[keyOf(f)]?.error)))) return waitButton('Reading proposers…')
   if (!safes.some(f => owns(f, S.account))) return html`<span class="muted">Not an owner of these Safes</span>`
-  return html`<button class="primary" ?disabled=${!delegate || !S.newProposer.label.trim() || !targets.length || !!run || S.waiting}
-    @click=${() => addTyped(targets)}>${delegate && targets.length ? `Add to ${plural(targets.length, 'Safe')}` : 'Add proposer'}</button>`
+  const plan = proposerPlan().filter(p => addable(p.missing).length), adds = plan.reduce((n, p) => n + addable(p.missing).length, 0)
+  const needsLabel = !!typed && !S.newProposer.label.trim() && !proposerRows().some(r => eq(r.delegate, typed))
+  return html`<button class="primary" ?disabled=${!plan.length || S.waiting}
+    data-tip=${plan.length ? `${plural(adds, 'Safe')} in all: one wallet signature per proposer` : needsLabel ? 'Give it a label' : 'Tick a proposer, or type a new one'}
+    @click=${() => addPlan()}>${plan.length ? `Add ${plan.length === 1 ? `to ${plural(adds, 'Safe')}` : `${plan.length} proposers`}` : 'Add proposers'}</button>`
 }
 
 const STAGES = ['Safe', 'Build Txn', 'Review']

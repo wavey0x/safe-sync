@@ -158,15 +158,16 @@ try {
   await hover('.pick', 'base')
   await shot('5-synced', 'main > .card, .tip.on', 'main > .card')
 
-  // 6. Proposers: the sandbox's keeper bot is missing on three chains, and one more is about to go on all of them.
+  // 6. Proposers: the sandbox's keeper bot, ticked for the three chains it's missing from, and a new one about to go on all of them.
   await as(OWNERS[3].address)
   await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 0, y: 0 })
   await js(`[...document.querySelectorAll('a')].find(a => a.textContent === 'Set proposers').click()`)
-  await until(`[...document.querySelectorAll('main button')].some(b => b.textContent.trim() === 'Add to 3')`, 'the proposers')
+  await until(`[...document.querySelectorAll('.tick')].some(t => t.textContent.trim() === 'Add to 3')`, 'the proposers')
+  await js(`document.querySelector('.tick input').click()`)
   await js(`for (const [label, v] of [['Proposer to add', '0xdF3e18d64BC6A983f673Ab319CCaE4f1a57C7097'], ['Its label', 'Deployer']]) {
     const i = document.querySelector(\`input[aria-label="\${label}"]\`); i.value = v; i.dispatchEvent(new Event('input'))
   }`)
-  await until(`document.querySelector('.footer .primary')?.textContent.includes('Add to 14')`, 'Add to 14 Safes')
+  await until(`document.querySelector('.footer .primary')?.textContent.trim() === 'Add 2 proposers'`, 'Add 2 proposers')
   await shot('6-proposers', 'main > .card')
 } finally {
   ws.close(); chrome.kill(); server.stop(true); sb.stop()
