@@ -74,13 +74,16 @@ and the amber is gone: the same owners and threshold everywhere.
 ### Proposers on every chain too
 
 Proposers (Safe{Wallet} delegates) propose transactions without being owners. **Set proposers**, under
-Continue, shows them on every chain at once, with any chain one is missing from. An owner adds or removes
-one everywhere with a single signature: no transaction, nothing to execute. The page has a link of its
-own with the Safes in it, to send to an owner who adds them.
+Continue, shows them on every chain at once, with the chains each one is missing from. Mark one to add
+where it's missing, or to remove, or type a new one, then make every change in one go: a signature per
+proposer, no transaction, nothing to execute.
+
+The changes go in the page's link. If you're not an owner, send it to one: they open it, connect, and
+click once.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/6-proposers-dark.png">
-  <img src="docs/6-proposers-light.png" width="700" alt="Proposers of the Safe on 14 chains: a keeper bot missing on mantle, fraxtal and taiko with Add to 3, and a new proposer about to be added to 14 Safes">
+  <img src="docs/6-proposers-light.png" width="700" alt="Proposers of the Safe on 14 chains: a keeper bot marked for adding to the 3 Safes it is missing from, a new proposer for all 14, and Add 2 proposers">
 </picture>
 
 ## Good to know

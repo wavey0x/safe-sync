@@ -8,7 +8,7 @@ import { LOGO } from './logos'
 import {
   applyOps, batchId, chainName, chainOf, client, config, decodeBatch, delegateHash, delegateTypedData, describe, domainHash, encodeBatch, execData,
   findSafe, linesFromTx, linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, parseProposersPath, pickNonce, prepareTarget,
-  proposersPath, readSafe, resolveNames, ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, settingsFrom, short, sigOwner, totpNow, walletTypedData, ZERO,
+  type ProposerChanges, proposersPath, readSafe, resolveNames, ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, settingsFrom, short, sigOwner, totpNow, walletTypedData, ZERO,
   type Action, type Batch, type Found, type NonceChoice, type OwnerOp, type Prepared, type Queued, type Step, type Target, type Tx,
 } from './safe'
 import * as svc from './service'
@@ -82,7 +82,8 @@ const S = {
   edits: {} as Record<string, Edit>, chainQuery: '', customOnly: false, openChain: null as number | null, addingChain: null as number | null,
   // The proposers page: its Safes (from its link), and each one's proposers keyed "chainId:safe".
   pSafes: [] as Found[], pErrors: [] as string[], proposers: {} as Record<string, ProposerRead>,
-  newProposer: { address: '', label: '' }, proposerRun: null as { delegate: string; text: string } | null, proposerAdded: false,
+  // The changes made on it, kept in its link until they're done; the proposer being typed; the run that makes them.
+  pChanges: { add: [], remove: [] } as ProposerChanges, newProposer: { address: '', label: '' }, proposerRun: '', proposersDone: '',
   delegateSigs: {} as Record<string, { totp: number; sig: Hex }>, // keyed "account:delegate", lowercase: one signature per hour
 }
 
@@ -285,17 +286,19 @@ async function loadSource() {
 
 // Proposers (Safe{Wallet} delegates) live in each chain's Safe service, not on chain: an owner adds or removes one with
 // a signature, no transaction, and one signature serves every chain (delegateTypedData). Their page is a link of its own,
-// #proposers/eth,base:0xSafe, so whoever sets the Safes up can send it to an owner who adds them.
+// #proposers/eth,base:0xSafe/+0xNew:Label, that carries the changes made on it too: whoever makes them, owner or not, can
+// send it to an owner, who opens it and applies them with one click.
 const eq = (a?: string | null, b?: string | null) => !!a && !!b && a.toLowerCase() === b.toLowerCase()
 const owns = (f: Found, a?: Address | null) => !!f.state?.owners.some(o => eq(o, a))
 /** The page's Safes that are read and have a Safe service: the only ones that can have proposers. */
 const withService = () => S.pSafes.filter(f => f.state && svc.serviceUrl(f.chainId))
-const proposersLink = (targets: Target[]) => `${location.href.split('#')[0]}#${proposersPath(targets)}`
+const proposersLink = (targets: Target[], changes?: ProposerChanges) => `${location.href.split('#')[0]}#${proposersPath(targets, changes)}`
 
 /** Opens a proposers link. Safes this page already found aren't read again. */
 function openProposers(path: string) {
-  const { targets, errors } = parseProposersPath(path)
+  const { targets, changes, errors } = parseProposersPath(path)
   S.mode = 'proposers'; S.pErrors = errors; S.errors = []
+  S.pChanges = changes; S.newProposer = { address: '', label: '' }; S.proposersDone = ''
   S.pSafes = targets.map(t => S.found.find(f => keyOf(f) === keyOf(t) && f.state) ?? { ...t })
   for (const f of S.pSafes) if (!f.state) readOne(f)
   loadProposers(true)
@@ -321,13 +324,13 @@ function loadProposers(again = false) { for (const f of S.pSafes) if (svc.servic
 /** As the service decides: named by a current owner, not expired. Any other can't propose, so it isn't shown. */
 const proposersOf = (f: Found) => (S.proposers[keyOf(f)]?.list ?? []).filter(d => owns(f, d.delegator) && (!d.expiryDate || Date.parse(d.expiryDate) > Date.now()))
 
-type ProposerRow = { delegate: Address; label: string; by: Address[]; on: Found[]; missing: Found[] }
+type ProposerRow = { delegate: Address; label: string; by: Address[]; on: Found[]; missing: Found[]; change?: 'add' | 'remove' }
 /** Every proposer of the page's Safes, with the Safes it isn't one of yet: the most widespread first. */
 function proposerRows(): ProposerRow[] {
   const read = withService().filter(f => S.proposers[keyOf(f)]?.list)
   const rows = new Map<string, { delegate: Address; labels: string[]; by: Address[]; on: Found[] }>()
   for (const f of read) for (const d of proposersOf(f)) {
-    const r = rows.get(d.delegate.toLowerCase()) ?? { delegate: d.delegate, labels: [], by: [], on: [] }
+    const r = rows.get(d.delegate.toLowerCase()) ?? { delegate: getAddress(d.delegate), labels: [], by: [], on: [] }
     r.labels.push(d.label)
     if (!r.by.some(b => eq(b, d.delegator))) r.by.push(d.delegator)
     if (!r.on.includes(f)) r.on.push(f)
@@ -336,9 +339,58 @@ function proposerRows(): ProposerRow[] {
   return [...rows.values()].map(r => ({ ...r, label: mostCommon(r.labels.filter(Boolean)) ?? '', missing: read.filter(f => !r.on.includes(f)) }))
     .sort((a, b) => b.on.length - a.on.length || a.label.localeCompare(b.label))
 }
-/** Only an owner adds a proposer. Removing takes the owner who added it, or the proposer itself. */
-const addable = (missing: Found[]) => missing.filter(f => owns(f, S.account))
-const removable = (r: ProposerRow) => r.on.filter(f => proposersOf(f).some(d => eq(d.delegate, r.delegate) && (eq(d.delegator, S.account) || eq(d.delegate, S.account))))
+
+const typedProposer = () => { const a = S.newProposer.address.trim(); return isAddress(a) ? getAddress(a) : undefined }
+/** The typed proposer, once it can be added: a new address with its label. One that's listed is marked on its row instead. */
+const typedAdd = () => { const delegate = typedProposer(), label = S.newProposer.label.trim(); return delegate && label && !proposerRows().some(r => eq(r.delegate, delegate)) ? { delegate, label } : undefined }
+/** The changes, with the typed proposer among them: what the link carries and the button applies. */
+const changes = (): ProposerChanges => { const t = typedAdd(), add = S.pChanges.add; return { ...S.pChanges, add: t && !add.some(a => eq(a.delegate, t.delegate)) ? [...add, t] : add } }
+
+/** Every proposer listed with its change, and the ones being added that aren't a proposer anywhere yet, last. */
+function pageRows(typed = false): ProposerRow[] {
+  const rows = proposerRows(), read = withService().filter(f => S.proposers[keyOf(f)]?.list), { add, remove } = typed ? changes() : S.pChanges
+  for (const a of add) if (!rows.some(r => eq(r.delegate, a.delegate))) rows.push({ delegate: a.delegate, label: a.label, by: [], on: [], missing: read })
+  return rows.map(r => ({ ...r, change: remove.some(d => eq(d, r.delegate)) ? 'remove' : add.some(a => eq(a.delegate, r.delegate)) && r.missing.length ? 'add' : undefined }))
+}
+
+/** The link is the page: each change goes into it, so a reload keeps it and Copy link sends it. */
+function proposersChanged() {
+  S.errors = []; S.proposersDone = ''
+  history.replaceState(history.state, '', proposersLink(S.pSafes, changes())); update()
+}
+/** Marks a proposer to add everywhere it's missing, or to remove, or (no change) neither. */
+function markProposer(r: ProposerRow, change?: 'add' | 'remove') {
+  S.pChanges = { add: S.pChanges.add.filter(a => !eq(a.delegate, r.delegate)), remove: S.pChanges.remove.filter(d => !eq(d, r.delegate)) }
+  if (change === 'add') S.pChanges.add.push({ delegate: r.delegate, label: r.label })
+  if (change === 'remove') S.pChanges.remove.push(r.delegate)
+  proposersChanged()
+}
+/** A typed address that's listed already goes onto its row; a new one goes in as a row of its own once it has a label. */
+function enterProposer(commit = false) {
+  const d = typedProposer(), row = d && pageRows().find(r => eq(r.delegate, d)), t = typedAdd()
+  if (row?.missing.length) markProposer(row, 'add')
+  else if (commit && t && !row) S.pChanges.add.push(t)
+  else return proposersChanged()
+  S.newProposer = { address: '', label: '' }; proposersChanged()
+}
+
+type ProposerOp = { delegate: Address; label: string | null; f: Found } // label null: remove
+/**
+ * What the connected wallet can do of the changes, and how many Safes are left for another owner: only an owner adds a
+ * proposer, and only the owner who added it (or the proposer itself) removes it.
+ */
+function proposerPlan(rows: ProposerRow[]) {
+  const ops: ProposerOp[] = []
+  let left = 0
+  for (const r of rows) {
+    const safes = r.change === 'add' ? r.missing.filter(f => owns(f, S.account))
+      : r.change === 'remove' ? r.on.filter(f => proposersOf(f).some(d => eq(d.delegate, r.delegate) && (eq(d.delegator, S.account) || eq(d.delegate, S.account)))) : []
+    ops.push(...safes.map(f => ({ delegate: r.delegate, label: r.change === 'add' ? r.label || 'Proposer' : null, f })))
+    left += r.change === 'add' ? r.missing.length - safes.length
+      : r.change === 'remove' ? r.on.filter(f => proposersOf(f).some(d => eq(d.delegate, r.delegate) && !eq(d.delegator, S.account) && !eq(d.delegate, S.account))).length : 0
+  }
+  return { ops, left, adds: rows.filter(r => r.change === 'add'), removes: rows.filter(r => r.change === 'remove') }
+}
 
 /** The one signature that adds or removes `delegate` on every chain, kept for the hour it's made in. */
 async function delegateSig(account: Address, delegate: Address): Promise<Hex> {
@@ -351,44 +403,51 @@ async function delegateSig(account: Address, delegate: Address): Promise<Hex> {
 }
 
 /**
- * Adds `delegate` with `label` to each Safe, or (label null) removes it. One wallet signature, then each chain's Safe service
- * in parallel (each service host keeps its own pace). Each Safe's list changes as its service answers.
+ * Makes every change the wallet can: one signature per proposer, then each chain's Safe service in parallel (each service
+ * host keeps its own pace), each Safe's list changing as its service answers. A change done everywhere leaves the link;
+ * what's left for another owner stays in it.
  */
-async function changeProposer(delegate: Address, label: string | null, targets: Found[]): Promise<boolean> {
-  const account = S.account!, verb = label === null ? 'Removing' : 'Adding'
-  const run = (S.proposerRun = { delegate: delegate.toLowerCase(), text: 'Confirm in your wallet' })
-  S.errors = []; update()
+async function applyProposers() {
+  enterProposer(true)
+  const account = S.account!, { ops } = proposerPlan(pageRows()), delegates = [...new Set(ops.map(o => o.delegate))], sigs: Record<string, Hex> = {}
+  const errors = new Set<string>()
   try {
-    const signature = await delegateSig(account, delegate)
-    let done = 0
-    run.text = `${verb} 0 of ${targets.length}…`; update()
-    await Promise.all(targets.map(async f => {
-      const k = keyOf(f)
-      try {
-        if (label !== null) {
-          await svc.addProposer(f.chainId, { safe: f.safe, delegate, delegator: account, label, signature })
-          const list = (S.proposers[k]?.list ?? []).filter(d => !(eq(d.delegate, delegate) && eq(d.delegator, account)))
-          S.proposers[k] = { list: [...list, { safe: f.safe, delegate, delegator: account, label, expiryDate: null }] }; changedAt[k] = Date.now()
-        } else {
-          for (const d of proposersOf(f).filter(d => eq(d.delegate, delegate) && (eq(d.delegator, account) || eq(delegate, account)))) {
-            await svc.removeProposer(f.chainId, { safe: f.safe, delegate, delegator: d.delegator, signature })
-            S.proposers[k] = { list: (S.proposers[k]?.list ?? []).filter(x => x !== d) }; changedAt[k] = Date.now()
-          }
+    for (const [i, d] of delegates.entries()) {
+      S.proposerRun = delegates.length > 1 ? `Confirm ${i + 1} of ${delegates.length} in your wallet` : 'Confirm in your wallet'; update()
+      sigs[d] = await delegateSig(account, d)
+    }
+  } catch (e) { S.proposerRun = ''; S.errors = [rejected(e) ? 'The request was rejected in your wallet.' : msg(e)]; return update() }
+  const verb = ops.every(o => o.label !== null) ? 'Adding' : ops.every(o => o.label === null) ? 'Removing' : 'Updating'
+  let done = 0
+  const tick = () => { S.proposerRun = `${verb} ${done} of ${ops.length}…`; update() }
+  tick()
+  await Promise.all(ops.map(async ({ delegate, label, f }) => {
+    const k = keyOf(f), signature = sigs[delegate]
+    try {
+      if (label !== null) {
+        await svc.addProposer(f.chainId, { safe: f.safe, delegate, delegator: account, label, signature })
+        const list = (S.proposers[k]?.list ?? []).filter(d => !(eq(d.delegate, delegate) && eq(d.delegator, account)))
+        S.proposers[k] = { list: [...list, { safe: f.safe, delegate, delegator: account, label, expiryDate: null }] }; changedAt[k] = Date.now()
+      } else {
+        for (const d of proposersOf(f).filter(d => eq(d.delegate, delegate) && (eq(d.delegator, account) || eq(delegate, account)))) {
+          await svc.removeProposer(f.chainId, { safe: f.safe, delegate, delegator: d.delegator, signature })
+          S.proposers[k] = { list: (S.proposers[k]?.list ?? []).filter(x => x !== d) }; changedAt[k] = Date.now()
         }
-      } catch (e) { S.errors.push(`${chainName(f.chainId)}: ${msg(e)}`) }
-      run.text = `${verb} ${++done} of ${targets.length}…`; update()
-    }))
-  } catch (e) { S.errors.push(rejected(e) ? 'The request was rejected in your wallet.' : msg(e)) }
-  S.proposerRun = null; update()
-  return !S.errors.length
-}
-
-const typedProposer = () => { const a = S.newProposer.address.trim(); return isAddress(a) ? getAddress(a) : undefined }
-/** Adds the typed proposer to every Safe the connected owner owns that doesn't have it yet. */
-async function addTyped(targets: Found[]) {
-  if (!(await changeProposer(typedProposer()!, S.newProposer.label.trim(), targets))) return
-  S.newProposer = { address: '', label: '' }; S.proposerAdded = true; update()
-  setTimeout(() => { S.proposerAdded = false; update() }, 2500)
+      }
+    } catch (e) { errors.add(`${chainName(f.chainId)}: ${msg(e)}`) }
+    done++; tick()
+  }))
+  const after = proposerRows()
+  S.pChanges = {
+    add: S.pChanges.add.filter(a => { const r = after.find(r => eq(r.delegate, a.delegate)); return !r || r.missing.length }),
+    remove: S.pChanges.remove.filter(d => after.some(r => eq(r.delegate, d))),
+  }
+  S.proposerRun = ''; proposersChanged(); S.errors = [...errors]
+  if (!errors.size && !S.pChanges.add.length && !S.pChanges.remove.length) {
+    S.proposersDone = verb === 'Adding' ? 'Added ✓' : verb === 'Removing' ? 'Removed ✓' : 'Done ✓'
+    setTimeout(() => { S.proposersDone = ''; update() }, 2500)
+  }
+  update()
 }
 
 // ---------------------------------------------------------------- compose: prepare and share
@@ -1098,50 +1157,57 @@ function proposerSafes() {
   return html`<div class="p-safes">${[...new Set(S.pSafes.map(f => f.safe))].map(safe => html`<div class="spaced">${addr(safe, {})}<span class="chips">${S.pSafes.filter(f => f.safe === safe).map(chip)}</span></div>`)}</div>`
 }
 
-function proposersEditor() {
-  const safes = withService(), rows = proposerRows(), run = S.proposerRun, busy = !!run || S.waiting
+/**
+ * Each proposer with where it is and its change: Add to the Safes it's missing from, or Remove, both just marked until
+ * the footer's button makes them. Then a row to type a new one in.
+ */
+function proposersEditor(rows: ProposerRow[]) {
+  const safes = withService(), busy = !!S.proposerRun
   const unread = S.pSafes.filter(f => { if (!svc.serviceUrl(f.chainId) || f.error) return false; const p = S.proposers[keyOf(f)]; return !f.state || !p || (p.reading && !p.list && !p.error) })
   const failed = safes.filter(f => S.proposers[keyOf(f)]?.error), total = S.pSafes.filter(f => svc.serviceUrl(f.chainId) && !f.error).length
   const by = (r: ProposerRow) => `Added by ${r.by.map(a => (eq(a, S.account) ? 'you' : short(a))).join(', ')}`
-  const typed = S.newProposer.address.trim(), delegate = typedProposer()
+  const typedText = S.newProposer.address.trim(), delegate = typedProposer()
+  const enter = (e: KeyboardEvent) => { if (e.key === 'Enter') enterProposer(true) }
   return html`
-    <div class="owners">${rows.map(r => {
-      const add = addable(r.missing), remove = removable(r)
-      return html`<div class="owner proposer">
-        <span class="who-addr">${addr(r.delegate, {})}</span>
-        <span class="who"><span data-tip=${by(r)}>${r.label || html`<span class="muted">No label</span>`}</span></span>
-        ${proposerCoverage(r)}
-        <span class="actions">${run?.delegate === r.delegate.toLowerCase() ? busyLine(run.text) : S.account ? html`
-          ${add.length ? html`<button class="ghost" ?disabled=${busy} @click=${() => changeProposer(r.delegate, r.label || 'Proposer', add)}>Add to ${add.length}</button>` : nothing}
-          ${remove.length ? html`<button class="ghost" ?disabled=${busy} data-tip=${remove.length < r.on.length ? 'Another owner added it on the rest: only they can remove it there' : nothing}
-            @click=${() => changeProposer(r.delegate, null, remove)}>${remove.length < r.on.length ? `Remove from ${remove.length}` : 'Remove'}</button>` : nothing}` : nothing}</span>
-      </div>`
-    })}
+    <div class="owners">${rows.map(r => html`<div class="owner proposer">
+        <span class="who-addr">${addr(r.delegate, {}, r.change === 'remove' ? 'mono gone' : 'mono')}</span>
+        <span class="who"><span class=${r.change === 'remove' ? 'muted' : ''} data-tip=${r.by.length ? by(r) : nothing}>${r.label || html`<span class="muted">No label</span>`}</span></span>
+        ${r.change === 'add' ? html`<span class="where good small">adding to ${plural(r.missing.length, 'Safe')}</span>`
+        : r.change === 'remove' ? html`<span class="where bad small">removing from ${plural(r.on.length, 'Safe')}</span>`
+        : proposerCoverage(r)}
+        <span class="actions">${r.change ? html`<button class="ghost" ?disabled=${busy} @click=${() => markProposer(r)}>Undo</button>` : html`
+          ${r.missing.length ? html`<button class="ghost" ?disabled=${busy} @click=${() => markProposer(r, 'add')}>Add to ${r.missing.length}</button>` : nothing}
+          <button class="ghost" ?disabled=${busy} @click=${() => markProposer(r, 'remove')}>Remove</button>`}</span>
+      </div>`)}
       <div class="owner adding">
         <span class="swap add"><span class="good" aria-hidden="true">+</span>
-          <input class="mono" spellcheck="false" placeholder="Proposer address, 0x…" aria-label="Proposer to add" .value=${live(S.newProposer.address)} @input=${(e: any) => { S.newProposer.address = e.target.value; update() }}>
-          <input class="label-input" maxlength="50" placeholder="Label" aria-label="Its label" .value=${live(S.newProposer.label)} @input=${(e: any) => { S.newProposer.label = e.target.value; update() }}>
+          <input class="mono" spellcheck="false" placeholder="Proposer address, 0x…" aria-label="Proposer to add" .value=${live(S.newProposer.address)} @input=${(e: any) => { S.newProposer.address = e.target.value; enterProposer() }} @keydown=${enter}>
+          <input class="label-input" maxlength="50" placeholder="Label" aria-label="Its label" .value=${live(S.newProposer.label)} @input=${(e: any) => { S.newProposer.label = e.target.value; enterProposer() }} @keydown=${enter}>
         </span>
+        <span class="actions"><button class="ghost" ?disabled=${!typedAdd() || busy} @click=${() => enterProposer(true)}>Add</button></span>
       </div>
     </div>
-    ${typed && !delegate ? html`<div class="small bad">Not an address</div>` : nothing}
-    ${delegate && rows.some(r => eq(r.delegate, delegate) && !r.missing.length) ? html`<div class="small muted">Already a proposer on every Safe</div>` : nothing}
+    ${typedText && !delegate ? html`<div class="small bad">Not an address</div>` : nothing}
+    ${delegate && rows.some(r => eq(r.delegate, delegate)) ? html`<div class="small muted">Already a proposer on every Safe</div>` : nothing}
     ${unread.length ? busyLine(`Reading proposers on ${total - unread.length} of ${total} Safes`)
     : !rows.length && !failed.length && safes.length ? html`<div class="small muted">No proposers yet</div>` : nothing}
     ${failed.length ? html`<div class="chips">${failed.map(f => html`<button class="pick unreachable" data-tip=${`Couldn't read its proposers: ${S.proposers[keyOf(f)]?.error}. Click to try again.`} @click=${() => readProposers(f)}>${logo(f.chainId)}${chainOf(f.chainId)?.short ?? f.chainId} ↻</button>`)}</div>` : nothing}`
 }
 
-/** Adds the typed proposer where it's missing: needs an owner's wallet, an address, a label, and every Safe read. */
+/** Makes the changes: needs a wallet that can make some of them, and every Safe read. Nothing to do, nothing shown. */
 function proposerAction() {
-  const delegate = typedProposer(), safes = withService(), read = safes.filter(f => S.proposers[keyOf(f)]?.list), run = S.proposerRun
-  const row = delegate && proposerRows().find(r => eq(r.delegate, delegate)), targets = addable(row ? row.missing : read)
-  if (S.proposerAdded) return html`<button class="primary" disabled>Added ✓</button>`
-  if (run && run.delegate === delegate?.toLowerCase()) return waitButton(run.text)
+  if (S.proposersDone) return html`<button class="primary" disabled>${S.proposersDone}</button>`
+  if (S.proposerRun) return waitButton(S.proposerRun)
+  const { ops, left, adds, removes } = proposerPlan(pageRows(true))
+  if (!adds.length && !removes.length) return nothing
   if (!S.account) return walletButton('footer')
   if (S.pSafes.some(f => !f.error && (!f.state || (svc.serviceUrl(f.chainId) && !S.proposers[keyOf(f)]?.list && !S.proposers[keyOf(f)]?.error)))) return waitButton('Reading proposers…')
-  if (!safes.some(f => owns(f, S.account))) return html`<span class="muted">Not an owner of these Safes</span>`
-  return html`<button class="primary" ?disabled=${!delegate || !S.newProposer.label.trim() || !targets.length || !!run || S.waiting}
-    @click=${() => addTyped(targets)}>${delegate && targets.length ? `Add to ${plural(targets.length, 'Safe')}` : 'Add proposer'}</button>`
+  if (!ops.length) return adds.length
+    ? html`<span class="muted" data-tip="Copy the link for an owner">Not an owner of these Safes</span>`
+    : html`<span class="muted" data-tip="Only the owner who added it, or the proposer, can remove it">Added by another owner</span>`
+  const a = new Set(ops.filter(o => o.label !== null).map(o => o.delegate)).size, r = new Set(ops.filter(o => o.label === null).map(o => o.delegate)).size
+  return html`<button class="primary" data-tip=${left ? `${plural(left, 'Safe')} left for another owner` : nothing} @click=${applyProposers}>${
+    a && r ? `Add ${a}, remove ${r}` : a ? `Add ${plural(a, 'proposer')}` : `Remove ${plural(r, 'proposer')}`}</button>`
 }
 
 const STAGES = ['Safe', 'Build Txn', 'Review']
@@ -1167,23 +1233,24 @@ function safeStage() {
   </section>`
 }
 
-/** The proposers page: its Safes, their proposers, and its own link to send to an owner who adds them. */
+/** The proposers page: its Safes, their proposers, and its own link, with the changes in it, to send to an owner. */
 function proposersView() {
   // Back to the Safes it was opened from; a link opened on its own goes to a new batch.
   const back = () => { if (history.state?.proposers) return history.back(); history.pushState({ stage: 1 }, '', location.pathname + location.search); route() }
+  const tip = changes().add.length || S.pChanges.remove.length ? 'This page with these Safes and changes, for an owner to open' : 'This page with these Safes, for an owner to open'
   return html`<section class="card">
     <div class="row"><h2 class="grow">Proposers</h2>
-      <button class="ghost" data-tip="This page with these Safes, for an owner to open" @click=${() => copyProposersLink()}>${S.copied === 'yes' ? 'Copied ✓' : S.copied === 'failed' ? "Couldn't copy" : 'Copy link'}</button>
+      <button class="ghost" data-tip=${tip} @click=${() => copyProposersLink()}>${S.copied === 'yes' ? 'Copied ✓' : S.copied === 'failed' ? "Couldn't copy" : 'Copy link'}</button>
     </div>
     ${S.pErrors.length ? html`<div class="errors">${S.pErrors.map(e => html`<div>${e}</div>`)}</div>` : nothing}
     ${proposerSafes()}
-    ${S.pSafes.length ? proposersEditor() : nothing}
+    ${S.pSafes.length ? proposersEditor(pageRows()) : nothing}
     ${errorList()}
     <div class="footer"><button class="ghost" @click=${back}>← Back</button><span class="grow"></span>${S.pSafes.length ? proposerAction() : nothing}</div>
   </section>`
 }
 function copyProposersLink() {
-  navigator.clipboard.writeText(proposersLink(S.pSafes)).then(() => { S.copied = 'yes' }, () => { S.copied = 'failed' }).finally(() => {
+  navigator.clipboard.writeText(proposersLink(S.pSafes, changes())).then(() => { S.copied = 'yes' }, () => { S.copied = 'failed' }).finally(() => {
     update(); setTimeout(() => { S.copied = ''; update() }, 1500)
   })
 }

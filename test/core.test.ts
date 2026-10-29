@@ -61,15 +61,20 @@ test('a proposer signature is the Safe service\'s Delegate message without a cha
   expect(await sigOwner(delegateHash(delegate, totp), sig)).toBe(acct.address)
 })
 
-test('a proposers link carries each Safe with its chains, and reads back the same Safes', () => {
-  const other = '0x7A1057E6e9093DA9C1D4C1D049609B6889fC4c67' as Address
+test('a proposers link carries each Safe with its chains and the changes, and reads back the same', () => {
+  const other = '0x7A1057E6e9093DA9C1D4C1D049609B6889fC4c67' as Address, bot = '0xdF3e18d64BC6A983f673Ab319CCaE4f1a57C7097' as Address
   const targets = [{ chainId: 1, safe: ORIGINAL }, { chainId: 8453, safe: ORIGINAL }, { chainId: 42161, safe: ORIGINAL }, { chainId: 1, safe: other }]
-  const path = proposersPath(targets)
-  expect(path).toBe(`proposers/eth,base,arb1:${ORIGINAL}/eth:${other}`)
-  expect(parseProposersPath(path)).toEqual({ targets, errors: [] })
-  // Lowercase addresses, chain ids and repeats are fine; what can't be read is said.
-  expect(parseProposersPath(`proposers/1,eth,8453:${ORIGINAL.toLowerCase()}`).targets).toEqual(targets.slice(0, 2))
-  expect(parseProposersPath(`proposers/nochain:${ORIGINAL}/eth:0x12`).errors).toEqual(['Unknown chain "nochain"', 'Expected "chain,chain:0xSafe", not "eth:0x12"'])
+  expect(proposersPath(targets)).toBe(`proposers/eth,base,arb1:${ORIGINAL}/eth:${other}`)
+  const changes = { add: [{ delegate: bot, label: 'Keeper / bot: v2' }], remove: [other] }
+  const path = proposersPath(targets, changes)
+  expect(path).toBe(`proposers/eth,base,arb1:${ORIGINAL}/eth:${other}/+${bot}:Keeper%20%2F%20bot%3A%20v2/-${other}`)
+  expect(parseProposersPath(path)).toEqual({ targets, changes, errors: [] })
+  // Lowercase addresses, chain ids and repeats are fine; a proposer is changed once, the first way it's named.
+  const read = parseProposersPath(`proposers/1,eth,8453:${ORIGINAL.toLowerCase()}/+${bot.toLowerCase()}/-${bot}`)
+  expect(read.targets).toEqual(targets.slice(0, 2))
+  expect(read.changes).toEqual({ add: [{ delegate: bot, label: '' }], remove: [] })
+  // What can't be read is said.
+  expect(parseProposersPath(`proposers/nochain:${ORIGINAL}/eth:0x12/+0x12`).errors).toEqual(['Unknown chain "nochain"', 'Expected "chain,chain:0xSafe", not "eth:0x12"', 'Expected "chain,chain:0xSafe", not "+0x12"'])
   expect(parseProposersPath('proposers/').errors).toEqual(['No Safes in this link'])
 })
 

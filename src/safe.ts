@@ -125,15 +125,34 @@ export function parseTargets(text: string): { targets: Target[]; errors: string[
   return { targets, errors }
 }
 
-/** A proposers link's path, after the #: "proposers/eth,base:0xSafe/eth:0xOther", each Safe with the chains it's on. */
-export function proposersPath(targets: Target[]): string {
+/** Proposers to make every Safe's (with the label each gets), and ones to take off every Safe. */
+export type ProposerChanges = { add: { delegate: Address; label: string }[]; remove: Address[] }
+
+/**
+ * A proposers link's path, after the #: each Safe with the chains it's on, then the changes to make,
+ * "proposers/eth,base:0xSafe/eth:0xOther/+0xNew:Its%20label/-0xOld".
+ */
+export function proposersPath(targets: Target[], changes: ProposerChanges = { add: [], remove: [] }): string {
   const chains = new Map<Address, string[]>()
   for (const t of targets) chains.set(t.safe, [...(chains.get(t.safe) ?? []), chainOf(t.chainId)?.short ?? String(t.chainId)])
-  return `proposers/${[...chains].map(([safe, c]) => `${c.join(',')}:${safe}`).join('/')}`
+  return `proposers/${[
+    ...[...chains].map(([safe, c]) => `${c.join(',')}:${safe}`),
+    ...changes.add.map(a => `+${a.delegate}${a.label ? `:${encodeURIComponent(a.label)}` : ''}`),
+    ...changes.remove.map(d => `-${d}`),
+  ].join('/')}`
 }
-export function parseProposersPath(path: string): { targets: Target[]; errors: string[] } {
-  const targets: Target[] = [], errors: string[] = []
+export function parseProposersPath(path: string): { targets: Target[]; changes: ProposerChanges; errors: string[] } {
+  const targets: Target[] = [], changes: ProposerChanges = { add: [], remove: [] }, errors: string[] = []
+  const decode = (s: string) => { try { return decodeURIComponent(s) } catch { return s } }
   for (const part of path.replace(/^proposers\/?/, '').split('/').filter(Boolean)) {
+    const c = part.match(/^([+-])(0x[0-9a-fA-F]{40})(?::(.*))?$/)
+    if (c) {
+      const delegate = getAddress(c[2].toLowerCase())
+      if ([...changes.add.map(a => a.delegate), ...changes.remove].includes(delegate)) continue
+      if (c[1] === '+') changes.add.push({ delegate, label: decode(c[3] ?? '').trim().slice(0, 50) })
+      else changes.remove.push(delegate)
+      continue
+    }
     const m = part.match(/^([a-z0-9,-]+):(0x[0-9a-fA-F]{40})$/i)
     if (!m) { errors.push(`Expected "chain,chain:0xSafe", not "${part}"`); continue }
     const safe = getAddress(m[2].toLowerCase())
@@ -144,7 +163,7 @@ export function parseProposersPath(path: string): { targets: Target[]; errors: s
     }
   }
   if (!targets.length && !errors.length) errors.push('No Safes in this link')
-  return { targets, errors }
+  return { targets, changes, errors }
 }
 
 export type Action =
