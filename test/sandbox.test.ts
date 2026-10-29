@@ -3,12 +3,12 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { createWalletClient, encodeFunctionData, http, parseAbi, publicActions, type Address, type Hex } from 'viem'
 import {
-  config, execData, findSafe, normalizeSig, parseActions, parseTargets, payloadKey, pickNonce, prepareTarget, readSafe, safeTxHash, sigOwner,
-  walletTypedData, type NonceChoice, type Prepared, type Tx,
+  config, delegateTypedData, execData, findSafe, normalizeSig, parseActions, parseTargets, payloadKey, pickNonce, prepareTarget, readSafe, safeTxHash, sigOwner,
+  totpNow, walletTypedData, type NonceChoice, type Prepared, type Tx,
 } from '../src/safe'
 import * as svc from '../src/service'
 import { startMockService } from './mock-service'
-import { ACCOUNTS, CHAIN_IDS, INCOMING, OWNERS, PROPOSER, startSandbox, type Sandbox } from './sandbox'
+import { ACCOUNTS, CHAIN_IDS, INCOMING, KEEPER, KEEPER_MISSING, OWNERS, PROPOSER, startSandbox, type Sandbox } from './sandbox'
 
 const enabled = !!Bun.which('anvil')
 let sb: Sandbox
@@ -185,6 +185,45 @@ test.skipIf(!enabled)('a proposer (delegate) proposes in its delegator\'s name, 
     expect([r.status, await r.text()]).toEqual([422, expect.stringContaining(`Sender=${outsider} is not an owner or delegate`)])
     expect(await svc.delegations(8453, outsider)).toHaveLength(3) // listed all the same: the client checks
   } finally { sb.service.delegates.splice(-rows.length) }
+}, 60_000)
+
+test.skipIf(!enabled)('one owner signature adds a proposer on every chain, and only its delegator or itself removes it', async () => {
+  const chains = [1, 8453, 252], delegate = ACCOUNTS[0].address, safe = sb.team
+  const signDelegate = (signer: (typeof OWNERS)[number], who: Address, chainId?: number) => {
+    const p = JSON.parse(delegateTypedData(who, totpNow())), { EIP712Domain, ...types } = p.types
+    return signer.signTypedData({ domain: { ...p.domain, ...(chainId ? { chainId } : {}) }, types, primaryType: 'Delegate', message: { ...p.message, totp: BigInt(p.message.totp) } })
+  }
+  // Safe{Wallet}'s list for one Safe: what was named for it, not what an owner named for all of its Safes.
+  const listed = async (chainId: number) => (await svc.proposers(chainId, safe)).map(d => [d.delegate, d.delegator, d.label])
+  expect(await listed(1)).toEqual([[KEEPER, OWNERS[1].address, 'Keeper bot']])
+  expect(await listed(KEEPER_MISSING[0])).toEqual([])
+
+  const signature = await signDelegate(OWNERS[3], delegate)
+  for (const chainId of chains) await svc.addProposer(chainId, { safe, delegate, delegator: OWNERS[3].address, label: 'Ops', signature })
+  for (const chainId of chains) expect(await listed(chainId)).toContainEqual([delegate, OWNERS[3].address, 'Ops'])
+  // The same delegator again only relabels it.
+  await svc.addProposer(1, { safe, delegate, delegator: OWNERS[3].address, label: 'Ops desk', signature })
+  expect((await listed(1)).filter(d => d[0] === delegate)).toEqual([[delegate, OWNERS[3].address, 'Ops desk']])
+
+  // Only an owner names one, with its own signature. A chain's own id in the message works there only.
+  const pr = svc.addProposer(1, { safe, delegate, delegator: PROPOSER.address, label: 'x', signature: await signDelegate(PROPOSER, delegate) })
+  await expect(pr).rejects.toThrow(`Provided delegator=${PROPOSER.address} is not an owner of Safe=${safe}`)
+  await expect(svc.addProposer(1, { safe, delegate, delegator: OWNERS[4].address, label: 'x', signature })).rejects.toThrow(`Signature does not match provided delegator=${OWNERS[4].address}`)
+  const onBase = await signDelegate(OWNERS[4], delegate, 8453)
+  await svc.addProposer(8453, { safe, delegate, delegator: OWNERS[4].address, label: 'Ops', signature: onBase })
+  await expect(svc.addProposer(1, { safe, delegate, delegator: OWNERS[4].address, label: 'Ops', signature: onBase })).rejects.toThrow('Signature does not match')
+
+  // Another owner can't remove what owner 4 named; owner 4 can, and so can the proposer itself.
+  await expect(svc.removeProposer(1, { safe, delegate, delegator: OWNERS[3].address, signature: await signDelegate(OWNERS[5], delegate) })).rejects.toThrow('Signature does not match provided delegate=')
+  await svc.removeProposer(1, { safe, delegate, delegator: OWNERS[3].address, signature })
+  await svc.removeProposer(8453, { safe, delegate, delegator: OWNERS[3].address, signature: await signDelegate(ACCOUNTS[0], delegate) })
+  expect((await listed(1)).filter(d => d[0] === delegate)).toEqual([])
+  expect((await listed(8453)).filter(d => d[0] === delegate)).toEqual([[delegate, OWNERS[4].address, 'Ops']])
+  // Removing one that's already gone is fine.
+  await svc.removeProposer(1, { safe, delegate, delegator: OWNERS[3].address, signature })
+  await svc.removeProposer(8453, { safe, delegate, delegator: OWNERS[4].address, signature: onBase })
+  await svc.removeProposer(252, { safe, delegate, delegator: OWNERS[3].address, signature })
+  for (const chainId of chains) expect((await listed(chainId)).filter(d => d[0] === delegate)).toEqual([])
 }, 60_000)
 
 // The app no longer proposes unsigned, but anyone can: the service keeps such proposals untrusted, and so must we.

@@ -1,9 +1,9 @@
 import { expect, test } from 'bun:test'
-import { getAddress, hashTypedData, type Address, type Hex } from 'viem'
+import { concat, encodeAbiParameters, getAddress, hashTypedData, keccak256, toHex, type Address, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import {
-  applyOps, pickNonce, settingsFrom, batchId, buildCalls, ownerOps, decodeBatch, describe, encodeBatch, linesFromTx, linesFromTxBuilder, normalizeSig, packMultiSend, packSigs,
-  parseActions, parseTargets, payloadKey, safeTxHash, sigOwner, unpackMultiSend, walletTypedData, type Tx,
+  applyOps, pickNonce, settingsFrom, batchId, buildCalls, ownerOps, decodeBatch, delegateHash, delegateTypedData, describe, encodeBatch, linesFromTx, linesFromTxBuilder,
+  normalizeSig, packMultiSend, packSigs, parseActions, parseTargets, payloadKey, safeTxHash, sigOwner, unpackMultiSend, walletTypedData, type Tx,
 } from '../src/safe'
 
 // Real proposal queued in Safe{Wallet} (Transaction Builder) on 2026-10-25 for the plan's rotation example.
@@ -43,6 +43,21 @@ test('wallet typed-data payload hashes to the same safeTxHash and recovers the s
   expect(await sigOwner(safeTxHash(EXAMPLE), (ethSign.slice(0, -2) + (parseInt(ethSign.slice(-2), 16) + 4).toString(16)) as Hex)).toBe(acct.address)
   // An approved-hash marker (v = 1) proves nothing off-chain, so it never counts
   expect(await sigOwner(safeTxHash(EXAMPLE), `0x${acct.address.slice(2).padStart(64, '0')}${'0'.repeat(64)}01`)).toBeUndefined()
+})
+
+test('a proposer signature is the Safe service\'s Delegate message without a chain id, and recovers the owner', async () => {
+  const delegate = '0x8a7dbC2824AcaC4d272289a33b255C3F1f3cdf32' as Address, totp = 495_000
+  // The service's own encoding (DelegateSignatureHelperV2 with chain_id None), written out by hand.
+  const type = (s: string) => keccak256(toHex(s))
+  const domain = keccak256(encodeAbiParameters([{ type: 'bytes32' }, { type: 'bytes32' }, { type: 'bytes32' }], [type('EIP712Domain(string name,string version)'), type('Safe Transaction Service'), type('1.0')]))
+  const struct = keccak256(encodeAbiParameters([{ type: 'bytes32' }, { type: 'address' }, { type: 'uint256' }], [type('Delegate(address delegateAddress,uint256 totp)'), delegate, BigInt(totp)]))
+  expect(delegateHash(delegate, totp)).toBe(keccak256(concat(['0x1901', domain, struct])))
+  // What the wallet is asked to sign hashes to the same, and the signature recovers to the owner who made it.
+  const p = JSON.parse(delegateTypedData(delegate, totp)), { EIP712Domain, ...types } = p.types
+  expect(p.domain.chainId).toBeUndefined()
+  const acct = privateKeyToAccount('0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d')
+  const sig = await acct.signTypedData({ domain: p.domain, types, primaryType: 'Delegate', message: { ...p.message, totp: BigInt(p.message.totp) } })
+  expect(await sigOwner(delegateHash(delegate, totp), sig)).toBe(acct.address)
 })
 
 test('prevOwner follows the owner list as it changes', () => {

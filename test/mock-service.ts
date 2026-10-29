@@ -2,7 +2,7 @@
 // source for the endpoints Safe Sync uses (safe-transaction-service v6.13.0 @ 83316729, safe-eth-py 7.27.0):
 // same paths, field validation, status codes, error texts and response shapes. Proposals live in memory;
 // owners, versions, nonces, approvals and executions are read from the chain, as the real service does.
-import { createPublicClient, getAddress, hashMessage, http, keccak256, parseAbi, recoverAddress, size, slice, toHex, type Address, type Hex, type PublicClient } from 'viem'
+import { createPublicClient, getAddress, hashMessage, hashTypedData, http, keccak256, parseAbi, recoverAddress, size, slice, toHex, type Address, type Hex, type PublicClient } from 'viem'
 import { CHAINS } from '../src/chains'
 import { SAFE_ABI } from '../src/safe'
 
@@ -76,7 +76,7 @@ function validateFields(body: any, spec: Record<string, { kind: 'address' | 'int
 
 export function startMockService(opts: MockOptions) {
   const txs = new Map<string, Stored>()
-  const delegates: Delegation[] = [] // seeded by the sandbox and tests; the real service adds them through a signed POST
+  const delegates: Delegation[] = [] // seeded by the sandbox and tests, or added through a signed POST as on the real service
   /** SafeContractDelegateManager.get_for_safe: for this Safe or every Safe, named by a current owner, not expired. */
   const delegationsFor = (chainId: number, safe: Address, owners: Address[]) => delegates.filter(d =>
     d.chainId === chainId && (d.safe === null || d.safe === safe) && owners.includes(d.delegator) && (d.expiryDate === null || Date.parse(d.expiryDate) > Date.now()))
@@ -126,6 +126,77 @@ export function startMockService(opts: MockOptions) {
       } catch { out.push({ signature: sig, type: 'EOA', valid: false }) }
     }
     return out
+  }
+
+  /**
+   * DelegateSerializerMixin.validate_delegator_signature: an EIP-712 Delegate message with this hour's or the last hour's
+   * totp, and this chain's id or none (one signature for every chain). True if `signer` made it.
+   */
+  async function delegateSigned(chainId: number, delegate: Address, signature: Hex, signer: Address): Promise<boolean> {
+    if (size(signature) > 65) throw new Error('More than one signatures detected, just one is expected')
+    let anyValid = false
+    for (const previous of [true, false]) for (const chain of [chainId, null]) {
+      const totp = Math.floor((Date.now() / 1000 - (previous ? 3600 : 0)) / 3600)
+      const hash = hashTypedData({
+        domain: { name: 'Safe Transaction Service', version: '1.0', ...(chain ? { chainId: chain } : {}) },
+        types: { Delegate: [{ name: 'delegateAddress', type: 'address' }, { name: 'totp', type: 'uint256' }] },
+        primaryType: 'Delegate', message: { delegateAddress: delegate, totp: BigInt(totp) },
+      })
+      const v = parseInt(signature.slice(-2), 16)
+      if (v !== 27 && v !== 28 && v <= 30) continue // contract and approved-hash signatures: not valid for an EOA delegator
+      const owner = await recoverAddress({ hash: v > 30 ? hashMessage({ raw: hash }) : hash, signature: v > 30 ? (signature.slice(0, -2) + (v - 4).toString(16)) as Hex : signature }).catch(() => null)
+      if (!owner) continue
+      anyValid = true
+      if (owner === signer) return true
+    }
+    if (!anyValid) throw new Error(`No valid signature found for signer=${signer}`)
+    return false
+  }
+
+  /** DelegateSerializerMixin.validate_safe_address_and_delegator: a delegator for one Safe must be one of its owners. */
+  async function delegatorProblem(chainId: number, safe: Address | null, delegator: Address): Promise<string | undefined> {
+    if (!safe) return
+    const owners: Address[] | null = await read(chainId, safe, 'getOwners').catch(() => null)
+    if (!owners) return `Safe=${safe} does not exist or it's still not indexed`
+    if (!owners.includes(delegator)) return `Provided delegator=${delegator} is not an owner of Safe=${safe}`
+  }
+
+  const delegateFields = {
+    safe: { kind: 'address', nullable: true }, delegator: { kind: 'address', required: true }, signature: { kind: 'hex', required: true, min: 65 },
+  } as const
+
+  /** POST /v2/delegates/ (DelegateSerializerV2): update_or_create on (safe, delegate, delegator), then the serializer's data. */
+  async function addDelegate(chainId: number, body: any): Promise<[number, unknown]> {
+    const { errors, out: a } = validateFields(body, { ...delegateFields, delegate: { kind: 'address', required: true }, label: { kind: 'string', required: true, max: 50 }, expiry_date: { kind: 'string', nullable: true } })
+    if (typeof a.label === 'string' && !a.label.trim()) (errors.label ??= []).push('This field may not be blank.')
+    if (a.expiry_date && !(Date.parse(a.expiry_date) > Date.now())) (errors.expiryDate ??= []).push('`expiry_date` cannot be previous to the current timestamp')
+    if (Object.keys(errors).length) return [400, errors]
+    const fail = (m: string): [number, unknown] => [400, { nonFieldErrors: [m] }]
+    const problem = await delegatorProblem(chainId, a.safe, a.delegator)
+    if (problem) return fail(problem)
+    try { if (!(await delegateSigned(chainId, a.delegate, a.signature, a.delegator))) return fail(`Signature does not match provided delegator=${a.delegator}`) } catch (e: any) { return fail(e.message) }
+    const label = a.label.trim(), expiryDate = a.expiry_date ?? null
+    const row = delegates.find(d => d.chainId === chainId && d.safe === a.safe && d.delegate === a.delegate && d.delegator === a.delegator)
+    if (row) Object.assign(row, { label, expiryDate })
+    else delegates.push({ chainId, safe: a.safe, delegate: a.delegate, delegator: a.delegator, label, expiryDate })
+    return [201, { safe: a.safe, delegate: a.delegate, delegator: a.delegator, signature: a.signature, label, expiryDate }]
+  }
+
+  /** DELETE /v2/delegates/{delegate}/: signed by the delegator or the delegate; every matching pair goes, for one Safe or all. */
+  async function removeDelegate(chainId: number, delegate: string, body: any): Promise<[number, unknown]> {
+    if (!isChecksummed(delegate)) return [422, { code: 1, message: 'Checksum address validation failed', arguments: [delegate] }]
+    const { errors, out: a } = validateFields(body, delegateFields)
+    if (Object.keys(errors).length) return [400, errors]
+    const fail = (m: string): [number, unknown] => [400, { nonFieldErrors: [m] }]
+    const problem = await delegatorProblem(chainId, a.safe, a.delegator)
+    if (problem) return fail(problem)
+    try {
+      if (!(await delegateSigned(chainId, delegate, a.signature, a.delegator)) && !(await delegateSigned(chainId, delegate, a.signature, delegate)))
+        return fail(`Signature does not match provided delegate=${delegate} or delegator=${a.delegator}`)
+    } catch (e: any) { return fail(e.message) }
+    const gone = delegates.filter(d => d.chainId === chainId && d.delegate === delegate && d.delegator === a.delegator && (!a.safe || d.safe === a.safe))
+    for (const d of gone) delegates.splice(delegates.indexOf(d), 1)
+    return [gone.length ? 204 : 404, null]
   }
 
   const view = (t: Stored, threshold: number) => ({
@@ -261,7 +332,7 @@ export function startMockService(opts: MockOptions) {
         const chainId = m ? shortToChain(m[1]) : undefined
         if (!m || chainId === undefined) return reply(404, { detail: 'Not found.' })
         if (throttled(srv.requestIP(req)?.address ?? 'local', !!req.headers.get('authorization'))) return reply(429, { detail: 'Request was throttled. Expected available in 1 second.' }, { 'retry-after': '1' })
-        const path = m[2], body = req.method === 'POST' ? await req.json().catch(() => ({})) : undefined
+        const path = m[2], body = ['POST', 'DELETE'].includes(req.method) ? await req.json().catch(() => ({})) : undefined
         let r: RegExpMatchArray | null
         if ((r = path.match(/^\/v2\/safes\/([^/]+)\/multisig-transactions\/$/))) {
           if (!isChecksummed(r[1])) return reply(422, { code: 1, message: 'Checksum address validation failed', arguments: [r[1]] })
@@ -287,6 +358,8 @@ export function startMockService(opts: MockOptions) {
           const rows = delegates.filter(d => d.chainId === chainId && filters.every(k => String(d[k]) === q.get(k)))
           return reply(200, { count: rows.length, next: null, previous: null, results: rows.map(({ chainId: _, ...d }) => d) })
         }
+        if (req.method === 'POST' && path === '/v2/delegates/') return reply(...await addDelegate(chainId, body))
+        if (req.method === 'DELETE' && (r = path.match(/^\/v2\/delegates\/([^/]+)\/$/))) return reply(...await removeDelegate(chainId, r[1], body))
         return reply(404, { detail: 'Not found.' })
       })().catch(e => reply(500, { detail: String(e?.shortMessage ?? e?.message ?? e) }))
       if (opts.log) console.log(`${req.method} ${url.pathname}${url.search} → ${res.status}`)

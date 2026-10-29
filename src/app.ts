@@ -6,9 +6,9 @@ import { getAddress, isAddress, toHex, type Address, type Hex } from 'viem'
 import { CHAINS } from './chains'
 import { LOGO } from './logos'
 import {
-  applyOps, batchId, chainName, chainOf, client, config, decodeBatch, describe, domainHash, encodeBatch, execData, findSafe, linesFromTx,
-  linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, pickNonce, prepareTarget, readSafe, resolveNames,
-  ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, settingsFrom, short, sigOwner, walletTypedData, ZERO,
+  applyOps, batchId, chainName, chainOf, client, config, decodeBatch, delegateHash, delegateTypedData, describe, domainHash, encodeBatch, execData,
+  findSafe, linesFromTx, linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, pickNonce, prepareTarget, readSafe,
+  resolveNames, ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, settingsFrom, short, sigOwner, totpNow, walletTypedData, ZERO,
   type Action, type Batch, type Found, type NonceChoice, type OwnerOp, type Prepared, type Queued, type Step, type Target, type Tx,
 } from './safe'
 import * as svc from './service'
@@ -29,14 +29,14 @@ type Row = {
   loaded?: Promise<void>; posting?: Promise<void>
 }
 type Wallet = { info: { name: string; icon: string; rdns: string }; provider: any }
-/** Where the wallet menu opens: under the header's button, or under Connect in a signing link's progress card. */
-type MenuAt = 'header' | 'card'
+/** Where the wallet menu opens: under the header's button, under Connect in a signing link's progress card, or in a footer. */
+type MenuAt = 'header' | 'card' | 'footer'
 type DelegationLookup = { data?: svc.Delegation[]; promise: Promise<void> }
 /** What the proposer entered. Also stored in the link, so "edit as new batch" can bring it back. */
 /** One owner in the target: `from` is who it started as (none for an added owner), `to` who it becomes (null: removed). */
 type OwnerRow = { from?: string; to: string | null; at?: number } // at: when it was replaced, so replacements keep that order
 type Draft = {
-  safes: string[]; mode: 'owners' | 'replicate' // safes: one address per field, first is the main Safe
+  safes: string[]; mode: 'owners' | 'replicate' | 'proposers' // safes: one address per field, first is the main Safe
   // The target, copied once from a Safe and then only edited: never recomputed from what the chains hold now.
   owners: OwnerRow[]; threshold: number | null; startedFrom: string // startedFrom: "chainId:safe"
   excluded: string[] // "chainId:safe" of chains left out
@@ -49,6 +49,8 @@ type Edit = { text: string; state: 'typing' | 'checking' | 'saved' | 'bad'; note
 // queue: other transactions queued at or after the on-chain nonce. same: this very transaction is one of them.
 type Prep = Prepared & { queue?: Queued[]; same?: boolean; checking?: boolean }
 type Stage = 1 | 2 | 3 // Safe, Build Txn, Review
+/** One Safe's proposers as its Safe service lists them; `list` stays shown while it's read again. */
+type ProposerRead = { list?: svc.Delegation[]; error?: string; reading?: boolean }
 
 let storageOk = true
 const store = {
@@ -78,6 +80,9 @@ const S = {
   signing: false, executing: false, waiting: false, current: null as Row | null, open: new Set<string>(), notice: '', copied: '' as '' | 'yes' | 'failed',
   settings: settingsFrom(store.get('safesync:settings', {})), settingsOpen: !!history.state?.settings, settingsChanged: false, closing: false,
   edits: {} as Record<string, Edit>, chainQuery: '', customOnly: false, openChain: null as number | null, addingChain: null as number | null,
+  proposers: {} as Record<string, ProposerRead>, // keyed "chainId:safe"
+  newProposer: { address: '', label: '' }, proposerRun: null as { delegate: string; text: string } | null, proposerAdded: false,
+  delegateSigs: {} as Record<string, { totp: number; sig: Hex }>, // keyed "account:delegate", lowercase: one signature per hour
 }
 
 let queued = false
@@ -226,25 +231,30 @@ const validOwner = (s: string) => isAddress(s) || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.e
 
 // ---------------------------------------------------------------- compose: stages
 
-/** Build Txn needs a selected Safe; Review also needs a complete change. */
-const reachable = (n: Stage) => n === 1 || (selected().length > 0 && (n === 2 || !actionsFor().errors.length))
+/** Build Txn needs a selected Safe; Review also needs a complete change. Proposers need no transaction, so no Review. */
+const reachable = (n: Stage) => n === 1 || (selected().length > 0 && (n === 2 || (S.d.mode !== 'proposers' && !actionsFor().errors.length)))
 
 /** Each move is a browser history entry, so the browser's Back and Forward step through the stages too. */
 function goTo(n: Stage) {
+  if (n === 3 && S.d.mode === 'proposers') return
   if (n === 3) { const a = actionsFor(); if (a.errors.length) return void ((S.errors = a.errors), update()) }
   if (n > 1 && !selected().length) return
   // Stepping back to the stage we came from is the browser's Back, so history doesn't fill with repeats.
   if (n < S.stage && history.state?.prev === n) return history.back()
   history.pushState({ stage: n, prev: S.stage }, '', location.pathname + location.search)
   S.stage = n; S.errors = []
+  if (n === 2 && S.d.mode === 'proposers') loadProposers(true)
   resume(); update(); scrollTo(0, 0)
 }
 
-/** Once the Safes are found (again): no Safe selected sends you back to Safe, and Review builds its results. */
+/** Once the Safes are found (again): no Safe selected sends you back to Safe, Review builds its results, Proposers reads. */
 function resume() {
   if (S.mode !== 'compose' || S.looking.size) return
-  if (S.stage > 1 && !selected().length) { S.stage = 1; history.replaceState({ stage: 1 }, '', location.pathname + location.search); update() }
+  const back = (n: Stage) => { S.stage = n; history.replaceState({ stage: n }, '', location.pathname + location.search); update() }
+  if (S.stage > 1 && !selected().length) back(1)
+  else if (S.stage === 3 && S.d.mode === 'proposers') back(2)
   else if (S.stage === 3 && !S.prepared.length && !S.preparing) prepare()
+  else if (S.stage === 2 && S.d.mode === 'proposers') loadProposers()
 }
 
 // ---------------------------------------------------------------- compose: replicate a transaction
@@ -273,6 +283,99 @@ async function loadSource() {
   } catch (e) { if (!current()) return; S.lines = ''; S.sourceNote = ''; S.errors = [msg(e)] }
   finally { if (current()) S.loadingSource = false }
   edited()
+}
+
+// ---------------------------------------------------------------- compose: proposers
+
+// Proposers (Safe{Wallet} delegates) live in each chain's Safe service, not on chain: an owner adds or removes one with
+// a signature, no transaction, and one signature serves every chain (delegateTypedData).
+const eq = (a?: string | null, b?: string | null) => !!a && !!b && a.toLowerCase() === b.toLowerCase()
+const owns = (f: Pick, a?: Address | null) => !!f.state?.owners.some(o => eq(o, a))
+/** Selected Safes on chains with a Safe service: the only ones that can have proposers. */
+const withService = () => selected().filter(f => svc.serviceUrl(f.chainId))
+
+// When a change last landed in a Safe's list: a read that started before it is older than what's shown, so it's dropped.
+const changedAt: Record<string, number> = {}
+function readProposers(f: Pick) {
+  const k = keyOf(f), at = Date.now()
+  S.proposers[k] = { list: S.proposers[k]?.list, reading: true }
+  const land = (p: ProposerRead) => { S.proposers[k] = (changedAt[k] ?? 0) >= at ? { list: S.proposers[k]?.list } : p }
+  return svc.proposers(f.chainId, f.safe).then(list => land({ list }), e => land({ error: msg(e) })).finally(update)
+}
+/** Each selected Safe's proposers: read on the way in (`again`), the last list shown meanwhile. */
+function loadProposers(again = false) { for (const f of withService()) if (again || !S.proposers[keyOf(f)]) readProposers(f) }
+
+/** As the service decides: named by a current owner, not expired. Any other can't propose, so it isn't shown. */
+const proposersOf = (f: Pick) => (S.proposers[keyOf(f)]?.list ?? []).filter(d => owns(f, d.delegator) && (!d.expiryDate || Date.parse(d.expiryDate) > Date.now()))
+
+type ProposerRow = { delegate: Address; label: string; by: Address[]; on: Pick[]; missing: Pick[] }
+/** Every proposer of the selected Safes, with the Safes it isn't one of yet: the most widespread first. */
+function proposerRows(): ProposerRow[] {
+  const read = withService().filter(f => S.proposers[keyOf(f)]?.list)
+  const rows = new Map<string, { delegate: Address; labels: string[]; by: Address[]; on: Pick[] }>()
+  for (const f of read) for (const d of proposersOf(f)) {
+    const r = rows.get(d.delegate.toLowerCase()) ?? { delegate: d.delegate, labels: [], by: [], on: [] }
+    r.labels.push(d.label)
+    if (!r.by.some(b => eq(b, d.delegator))) r.by.push(d.delegator)
+    if (!r.on.includes(f)) r.on.push(f)
+    rows.set(d.delegate.toLowerCase(), r)
+  }
+  return [...rows.values()].map(r => ({ ...r, label: mostCommon(r.labels.filter(Boolean)) ?? '', missing: read.filter(f => !r.on.includes(f)) }))
+    .sort((a, b) => b.on.length - a.on.length || a.label.localeCompare(b.label))
+}
+/** Only an owner adds a proposer. Removing takes the owner who added it, or the proposer itself. */
+const addable = (missing: Pick[]) => missing.filter(f => owns(f, S.account))
+const removable = (r: ProposerRow) => r.on.filter(f => proposersOf(f).some(d => eq(d.delegate, r.delegate) && (eq(d.delegator, S.account) || eq(d.delegate, S.account))))
+
+/** The one signature that adds or removes `delegate` on every chain, kept for the hour it's made in. */
+async function delegateSig(account: Address, delegate: Address): Promise<Hex> {
+  const key = `${account}:${delegate}`.toLowerCase(), totp = totpNow(), kept = S.delegateSigs[key]
+  if (kept?.totp === totp) return kept.sig
+  const sig = normalizeSig(await ask(() => S.provider.request({ method: 'eth_signTypedData_v4', params: [account, delegateTypedData(delegate, totp)] })))
+  if (!eq(await sigOwner(delegateHash(delegate, totp), sig), account)) throw new Error('The wallet returned a signature for a different account or message')
+  S.delegateSigs[key] = { totp, sig }
+  return sig
+}
+
+/**
+ * Adds `delegate` with `label` to each Safe, or (label null) removes it. One wallet signature, then each chain's Safe service
+ * in parallel (each service host keeps its own pace). Each Safe's list changes as its service answers.
+ */
+async function changeProposer(delegate: Address, label: string | null, targets: Pick[]): Promise<boolean> {
+  const account = S.account!, verb = label === null ? 'Removing' : 'Adding'
+  const run = (S.proposerRun = { delegate: delegate.toLowerCase(), text: 'Confirm in your wallet' })
+  S.errors = []; update()
+  try {
+    const signature = await delegateSig(account, delegate)
+    let done = 0
+    run.text = `${verb} 0 of ${targets.length}…`; update()
+    await Promise.all(targets.map(async f => {
+      const k = keyOf(f)
+      try {
+        if (label !== null) {
+          await svc.addProposer(f.chainId, { safe: f.safe, delegate, delegator: account, label, signature })
+          const list = (S.proposers[k]?.list ?? []).filter(d => !(eq(d.delegate, delegate) && eq(d.delegator, account)))
+          S.proposers[k] = { list: [...list, { safe: f.safe, delegate, delegator: account, label, expiryDate: null }] }; changedAt[k] = Date.now()
+        } else {
+          for (const d of proposersOf(f).filter(d => eq(d.delegate, delegate) && (eq(d.delegator, account) || eq(delegate, account)))) {
+            await svc.removeProposer(f.chainId, { safe: f.safe, delegate, delegator: d.delegator, signature })
+            S.proposers[k] = { list: (S.proposers[k]?.list ?? []).filter(x => x !== d) }; changedAt[k] = Date.now()
+          }
+        }
+      } catch (e) { S.errors.push(`${chainName(f.chainId)}: ${msg(e)}`) }
+      run.text = `${verb} ${++done} of ${targets.length}…`; update()
+    }))
+  } catch (e) { S.errors.push(rejected(e) ? 'The request was rejected in your wallet.' : msg(e)) }
+  S.proposerRun = null; update()
+  return !S.errors.length
+}
+
+const typedProposer = () => { const a = S.newProposer.address.trim(); return isAddress(a) ? getAddress(a) : undefined }
+/** Adds the typed proposer to every Safe the connected owner owns that doesn't have it yet. */
+async function addTyped(targets: Pick[]) {
+  if (!(await changeProposer(typedProposer()!, S.newProposer.label.trim(), targets))) return
+  S.newProposer = { address: '', label: '' }; S.proposerAdded = true; update()
+  setTimeout(() => { S.proposerAdded = false; update() }, 2500)
 }
 
 // ---------------------------------------------------------------- compose: prepare and share
@@ -545,7 +648,7 @@ async function connect(w?: Wallet, at: MenuAt = 'header') {
 function disconnect() {
   const provider = S.provider
   stop(); unlisten(); unlisten = () => {}
-  S.account = S.provider = null; S.delegations = {}; S.walletMenu = false
+  S.account = S.provider = null; S.delegations = {}; S.delegateSigs = {}; S.walletMenu = false
   store.set('safesync:wallet', '')
   // Wallets that support it forget this site as well, so the next Connect asks again.
   provider?.request?.({ method: 'wallet_revokePermissions', params: [{ eth_accounts: {} }] }).catch(() => {})
@@ -956,9 +1059,67 @@ function replicateEditor() {
     ${S.lines ? html`<div class="small good">✓ ${S.sourceNote}</div>` : nothing}`
 }
 
+/** Who's named, then where: "not on" the few chains it's missing from (amber, like a drifted chain), or "only on" the few it's on. */
+function proposerCoverage(r: ProposerRow) {
+  if (!r.missing.length) return nothing
+  // With more than one Safe address, a chain can appear twice: its tooltip says which Safe.
+  const of = new Set(withService().map(f => f.safe)).size > 1 ? (f: Pick) => ` of ${short(f.safe)}` : () => ''
+  const chips = (list: Pick[], cls: string, tip: (f: Pick) => string) => list.map(f => html`<span class=${cls} data-tip=${tip(f)}>${logo(f.chainId)}${chainOf(f.chainId)?.short ?? f.chainId}</span>`)
+  return r.on.length < r.missing.length
+    ? html`<span class="where"><span class="muted small">only on</span>${chips(r.on, 'chip', f => `A proposer${of(f)} on ${chainName(f.chainId)}`)}</span>`
+    : html`<span class="where"><span class="muted small">not on</span>${chips(r.missing, 'chip missing', f => `Not a proposer${of(f)} on ${chainName(f.chainId)}${S.account && !owns(f, S.account) ? ", and you're not an owner there" : ''}`)}</span>`
+}
+
+function proposersEditor() {
+  const safes = withService(), rows = proposerRows(), run = S.proposerRun, busy = !!run || S.waiting
+  const unread = safes.filter(f => { const p = S.proposers[keyOf(f)]; return !p || (p.reading && !p.list && !p.error) })
+  const failed = safes.filter(f => S.proposers[keyOf(f)]?.error), none = selected().filter(f => !svc.serviceUrl(f.chainId))
+  const by = (r: ProposerRow) => `Added by ${r.by.map(a => (eq(a, S.account) ? 'you' : short(a))).join(', ')}`
+  const typed = S.newProposer.address.trim(), delegate = typedProposer()
+  return html`
+    <div class="owners">${rows.map(r => {
+      const add = addable(r.missing), remove = removable(r)
+      return html`<div class="owner proposer">
+        <span class="who-addr">${addr(r.delegate, {})}</span>
+        <span class="who"><span data-tip=${by(r)}>${r.label || html`<span class="muted">No label</span>`}</span></span>
+        ${proposerCoverage(r)}
+        <span class="actions">${run?.delegate === r.delegate.toLowerCase() ? busyLine(run.text) : S.account ? html`
+          ${add.length ? html`<button class="ghost" ?disabled=${busy} @click=${() => changeProposer(r.delegate, r.label || 'Proposer', add)}>Add to ${add.length}</button>` : nothing}
+          ${remove.length ? html`<button class="ghost" ?disabled=${busy} data-tip=${remove.length < r.on.length ? 'Another owner added it on the rest: only they can remove it there' : nothing}
+            @click=${() => changeProposer(r.delegate, null, remove)}>${remove.length < r.on.length ? `Remove from ${remove.length}` : 'Remove'}</button>` : nothing}` : nothing}</span>
+      </div>`
+    })}
+      <div class="owner adding">
+        <span class="swap add"><span class="good" aria-hidden="true">+</span>
+          <input class="mono" spellcheck="false" placeholder="Proposer address, 0x…" aria-label="Proposer to add" .value=${live(S.newProposer.address)} @input=${(e: any) => { S.newProposer.address = e.target.value; update() }}>
+          <input class="label-input" maxlength="50" placeholder="Label" aria-label="Its label" .value=${live(S.newProposer.label)} @input=${(e: any) => { S.newProposer.label = e.target.value; update() }}>
+        </span>
+      </div>
+    </div>
+    ${typed && !delegate ? html`<div class="small bad">Not an address</div>` : nothing}
+    ${delegate && rows.some(r => eq(r.delegate, delegate) && !r.missing.length) ? html`<div class="small muted">Already a proposer on every Safe</div>` : nothing}
+    ${unread.length ? busyLine(`Reading proposers on ${safes.length - unread.length} of ${safes.length} Safes`)
+    : !rows.length && !failed.length && safes.length ? html`<div class="small muted">No proposers yet</div>` : nothing}
+    ${failed.length ? html`<div class="chips">${failed.map(f => html`<button class="pick unreachable" data-tip=${`Couldn't read its proposers: ${S.proposers[keyOf(f)]?.error}. Click to try again.`} @click=${() => readProposers(f)}>${logo(f.chainId)}${chainOf(f.chainId)?.short ?? f.chainId} ↻</button>`)}</div>` : nothing}
+    ${none.length ? html`<div class="small muted">No Safe service, so no proposers, on ${none.map(f => chainChip(f.chainId))}</div>` : nothing}`
+}
+
+/** Adds the typed proposer where it's missing: needs an owner's wallet, an address, a label, and every Safe read. */
+function proposerAction() {
+  const delegate = typedProposer(), safes = withService(), read = safes.filter(f => S.proposers[keyOf(f)]?.list), run = S.proposerRun
+  const row = delegate && proposerRows().find(r => eq(r.delegate, delegate)), targets = addable(row ? row.missing : read)
+  if (S.proposerAdded) return html`<button class="primary" disabled>Added ✓</button>`
+  if (run && run.delegate === delegate?.toLowerCase()) return waitButton(run.text)
+  if (!S.account) return walletButton('footer')
+  if (safes.some(f => !S.proposers[keyOf(f)]?.list && !S.proposers[keyOf(f)]?.error)) return waitButton('Reading proposers…')
+  if (!safes.some(f => owns(f, S.account))) return html`<span class="muted">Not an owner of these Safes</span>`
+  return html`<button class="primary" ?disabled=${!delegate || !S.newProposer.label.trim() || !targets.length || !!run || S.waiting}
+    @click=${() => addTyped(targets)}>${delegate && targets.length ? `Add to ${plural(targets.length, 'Safe')}` : 'Add proposer'}</button>`
+}
+
 const STAGES = ['Safe', 'Build Txn', 'Review']
 function stageBar(stage: Stage) {
-  return html`<nav class="stages" aria-label="Steps">${STAGES.map((label, i) => {
+  return html`<nav class="stages" aria-label="Steps">${(S.d.mode === 'proposers' ? ['Safe', 'Proposers'] : STAGES).map((label, i) => {
     const n = (i + 1) as Stage
     return html`${i ? html`<span class=${`stage-line ${n <= stage ? 'done' : ''}`}></span>` : nothing}
       <button class=${`stage ${n === stage ? 'on' : n < stage ? 'done' : ''}`} aria-current=${n === stage ? 'step' : nothing}
@@ -979,12 +1140,14 @@ function safeStage() {
 }
 
 function changeStage() {
-  const mode = (m: Draft['mode'], label: string) => html`<button class=${S.d.mode === m ? 'seg on' : 'seg'} aria-pressed=${S.d.mode === m} @click=${() => { S.d.mode = m; edited() }}>${label}</button>`
+  const mode = (m: Draft['mode'], label: string, tip?: string) => html`<button class=${S.d.mode === m ? 'seg on' : 'seg'} aria-pressed=${S.d.mode === m} data-tip=${tip ?? nothing}
+    @click=${() => { if (m === 'proposers' && S.d.mode !== m) loadProposers(true); S.d.mode = m; S.errors = []; edited(); resume() }}>${label}</button>`
+  const proposers = S.d.mode === 'proposers'
   return html`<section class="card">
-    <div class="row"><span class="segs">${mode('owners', 'Owners')}${mode('replicate', 'Other transaction')}</span></div>
-    ${S.d.mode === 'owners' ? ownersEditor() : replicateEditor()}
+    <div class="row"><span class="segs">${mode('owners', 'Owners')}${mode('replicate', 'Other transaction')}${mode('proposers', 'Proposers', 'Safe{Wallet} proposers: they propose transactions, and their signature never counts')}</span></div>
+    ${S.d.mode === 'owners' ? ownersEditor() : proposers ? proposersEditor() : replicateEditor()}
     ${errorList()}
-    ${footer(1, S.d.mode === 'replicate' && S.loadingSource ? waitButton('Loading the transaction…')
+    ${footer(1, proposers ? proposerAction() : S.d.mode === 'replicate' && S.loadingSource ? waitButton('Loading the transaction…')
       : html`<button class="primary" ?disabled=${S.d.mode === 'replicate' && !S.lines} @click=${() => goTo(3)}>Review ${plural(selected().length, 'Safe')}</button>`)}
   </section>`
 }
@@ -1366,12 +1529,12 @@ const walletMenu = () => html`<div class="menu" role="menu">${S.account
   : S.wallets.length ? S.wallets.map(w => html`<button class="ghost" role="menuitem" @click=${() => connect(w)}><img src=${w.info.icon} alt="">${w.info.name}</button>`)
   : html`<div class="muted small">No browser wallet found</div>`}</div>`
 
-/** Connect, the connected account, and Disconnect, in the header. A signing link's progress card also offers Connect. */
+/** Connect, the connected account, and Disconnect, in the header. A signing link's progress card and Proposers also offer Connect. */
 function walletButton(at: MenuAt = 'header') {
   return html`<span class=${at === 'card' ? 'wallet in-card' : 'wallet'}>
     ${S.account
       ? html`<button class="account" aria-haspopup="menu" aria-expanded=${S.walletMenu === at} @click=${() => { S.walletMenu = S.walletMenu === at ? false : at; update() }}><i class="dot"></i><span class="mono">${short(S.account)}</span></button>`
-      : html`<button class=${at === 'card' ? 'glint' : nothing} aria-haspopup="menu" aria-expanded=${S.walletMenu === at} @click=${() => connect(undefined, at)}>Connect wallet</button>`}
+      : html`<button class=${at === 'header' ? nothing : 'glint'} aria-haspopup="menu" aria-expanded=${S.walletMenu === at} @click=${() => connect(undefined, at)}>Connect wallet</button>`}
     ${S.walletMenu === at ? walletMenu() : nothing}
   </span>`
 }
@@ -1405,5 +1568,5 @@ window.addEventListener('popstate', () => {
 })
 // Signatures are kept in localStorage and re-uploaded on the next visit; only warn mid-session, or while a proposal
 // (whose signature isn't kept) is still uploading.
-window.addEventListener('beforeunload', e => { if (S.signing || S.executing || S.waiting || S.rows.some(r => r.proposing)) e.preventDefault() })
+window.addEventListener('beforeunload', e => { if (S.signing || S.executing || S.waiting || S.proposerRun || S.rows.some(r => r.proposing)) e.preventDefault() })
 route()

@@ -26,6 +26,8 @@ const [EXECUTOR, ...REST] = ACCOUNTS
 export const OWNERS = REST.slice(0, 9) // 5-of-9, like the Curve emergency Safes
 export const INCOMING = REST.slice(9, 11)
 export const PROPOSER = REST[11] // a Safe{Wallet} proposer (delegate): proposes, never signs, needs no gas
+export const KEEPER = mnemonicToAccount(MNEMONIC, { addressIndex: 13 }).address // a proposer of the team Safe on most chains
+export const KEEPER_MISSING = [5000, 252, 167000] // Mantle, Fraxtal, Taiko
 
 // 12 chains with Safe's own service, 2 (Fraxtal, Taiko) with one someone else runs. The mock stands in for all of
 // them: the sandbox must never reach a real service.
@@ -174,6 +176,8 @@ export async function startSandbox({ basePort = 0, servicePort = 0, rps = 2, log
     const service = startMockService({ port: servicePort, rps, rpc, log })
     // Owner 2 (never rotated out) named the proposer for all of its Safes, on every chain with a service.
     for (const id of CHAIN_IDS) service.delegates.push({ chainId: id, safe: null, delegate: PROPOSER.address, delegator: owners[1], label: 'Sandbox proposer', expiryDate: null })
+    // Owner 2 also made a bot a proposer of the team Safe, as Safe{Wallet} does (for that one Safe), but not on every chain.
+    for (const id of CHAIN_IDS) if (!KEEPER_MISSING.includes(id)) service.delegates.push({ chainId: id, safe: team, delegate: KEEPER, delegator: owners[1], label: 'Keeper bot', expiryDate: null })
     const post = (chainId: number, path: string, body: unknown) =>
       fetch(`${service.url(chainId)}/api${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
     const propose = async (tx: Tx, signer: (typeof OWNERS)[number]) => {
@@ -252,7 +256,8 @@ Safe Sync sandbox: http://localhost:${server.port}
   Team Safe ${sb.team} (5-of-9) on every chain, original Safe ${sb.original} on Ethereum, Safe 1.4.1 ${sb.scroll141} on Scroll${signers.length ? `\n  Your signers are owners ${signers.map((a, i) => `${9 - signers.length + i + 1} (${a})`).join(', ')} on all of them, with 100 ETH on every local chain` : ''}
   Set up to include: different nonces, a rotation already applied on Linea, transactions already queued on Gnosis and Polygon,
   the same rotation already queued on the original Safe with one signature, and a proposer (Safe{Wallet}
-  delegate of owner 2) that proposes signed but never confirms. "Not an owner" only views the link.
+  delegate of owner 2) that proposes signed but never confirms. "Not an owner" only views the link. Owner 2 also made a
+  keeper bot a proposer of the team Safe on every chain but Mantle, Fraxtal and Taiko (Build Txn → Proposers).
 
   The draft is filled in: Review → Copy signing link → Propose now. Or open a ready link: http://localhost:${server.port}/link
   Choose who signs in the "Sandbox wallet" box at the bottom left. Other wallets are hidden here: these chains

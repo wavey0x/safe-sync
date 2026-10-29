@@ -96,6 +96,20 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .owner .actions { display: flex; gap: 2px; }
 .owner .actions button { padding: 4px 8px; font-weight: 500; }
 .gone { text-decoration: line-through; color: var(--muted); }
+/* A proposer: its label, and below it the chains it's missing from (amber outline, like a drifted chain) or the few it's
+   on. On a phone its actions get a line of their own. */
+.proposer { grid-template-areas: 'addr who act' '. where where'; row-gap: 2px; }
+.proposer .who-addr { grid-area: addr; } .proposer .who { grid-area: who; min-width: 0; } .proposer .actions { grid-area: act; justify-content: flex-end; }
+.where { grid-area: where; display: flex; flex-wrap: wrap; align-items: center; gap: 3px 4px; padding-bottom: 2px; } .where .chip + .chip { margin-left: 0; }
+.chip.missing { background: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 70%, transparent); }
+.swap input.label-input { flex: 0 1 32%; font-family: inherit; }
+.owner.adding { border-bottom: 0; } /* the footer's rule follows */
+.seg { white-space: nowrap; } .segs { flex-wrap: wrap; } /* three modes fit a phone; a narrower screen wraps them */
+@media (max-width: 520px) {
+  .proposer { grid-template-columns: max-content minmax(0, 1fr); grid-template-areas: 'addr who' '. where' '. act'; }
+  .proposer .actions { justify-content: flex-start; margin-left: -8px; }
+  .seg { padding: 6px 8px; font-size: 13px; }
+}
 /* An address: short form, then a quiet copy button that turns into a drawn check */
 .addr { display: inline-flex; align-items: center; gap: 1px; white-space: nowrap; vertical-align: middle; }
 .addr a { color: inherit; text-decoration: underline dotted var(--line); text-underline-offset: 3px; }

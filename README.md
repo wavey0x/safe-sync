@@ -71,6 +71,17 @@ and the amber is gone: the same owners and threshold everywhere.
   <img src="docs/5-synced-light.png" width="700" alt="The same Safe on 14 chains, none amber; base's tooltip reads: Base, 5-of-9">
 </picture>
 
+### Proposers on every chain too
+
+Proposers (Safe{Wallet} delegates) propose transactions without being owners. Choose **Proposers** next to
+Owners to see them on every chain at once, with any chain one is missing from. An owner adds or removes
+one everywhere with a single signature: no transaction, nothing to execute.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/6-proposers-dark.png">
+  <img src="docs/6-proposers-light.png" width="700" alt="Proposers of the Safe: a keeper bot missing on mantle, fraxtal and taiko with Add to 3, and a new proposer about to be added to 14 Safes">
+</picture>
+
 ## Good to know
 
 - **No backend.** The link carries every transaction in its `#` fragment, which browsers never send
@@ -81,8 +92,9 @@ and the amber is gone: the same owners and threshold everywhere.
   next nonce after it, unless you choose to replace it.
 - **Not only owners.** *Other transaction* takes a Safe{Wallet} transaction link or Transaction Builder
   JSON and repeats it on every Safe.
-- **Proposers** (Safe{Wallet} delegates) can propose a link's transactions; their signature doesn't
-  count toward the threshold.
+- **Proposers** can propose a link's transactions; their signature doesn't count toward the threshold.
+  Like Safe{Wallet}, Safe Sync lists the ones named for that Safe, not the ones an owner named for all of
+  its Safes.
 - **No Safe service on a chain?** Signers copy their signatures to the executor by hand.
 - **Settings** (the gear): your own RPC or Safe service for any chain, and an optional Safe API key.
   They stay in your browser.

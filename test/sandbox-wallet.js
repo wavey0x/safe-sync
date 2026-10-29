@@ -2,7 +2,7 @@
 // for the local chains, and adds an EIP-6963 wallet that signs with the local test accounts.
 // In the full sandbox (real chain ids) it also hides other wallets: a real wallet would send executions
 // to the real networks. The simple sandbox uses local-only chain ids, so real wallets are fine there.
-// It behaves like MetaMask where it matters: lowercase accounts, chainId must match for typed data,
+// It behaves like MetaMask where it matters: lowercase accounts, a typed data chainId must match the chain's,
 // one confirmation per request (with a short delay), and rejections (code 4001).
 ;(() => {
   const cfg = window.__SANDBOX__
@@ -40,7 +40,8 @@
         case 'wallet_addEthereumChain': return null
         case 'eth_signTypedData_v4': {
           const data = JSON.parse(params[1])
-          if (Number(data.domain.chainId) !== chain) throw fail(`Provided chainId "${data.domain.chainId}" must match the active chainId "${chain}"`, -32602)
+          // Only a domain with a chain id must match (a Safe service delegate signature has none, to serve every chain).
+          if (data.domain.chainId !== undefined && Number(data.domain.chainId) !== chain) throw fail(`Provided chainId "${data.domain.chainId}" must match the active chainId "${chain}"`, -32602)
           await confirm()
           return rpc(method, [account, params[1]])
         }

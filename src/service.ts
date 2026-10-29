@@ -27,7 +27,7 @@ function slot(host: string, gap: number): Promise<void> {
   return next
 }
 
-async function api(chainId: number, path: string, body?: unknown): Promise<Response> {
+async function api(chainId: number, path: string, body?: unknown, method = body ? 'POST' : 'GET'): Promise<Response> {
   const base = serviceUrl(chainId)
   if (!base) throw new Error('No Safe Transaction Service for this chain')
   const host = new URL(base).host, keyed = !!config.apiKey && host === 'api.safe.global'
@@ -35,7 +35,7 @@ async function api(chainId: number, path: string, body?: unknown): Promise<Respo
     await slot(host, keyed ? config.gapMs * 0.4 : config.gapMs)
     const headers: Record<string, string> = { 'content-type': 'application/json' }
     if (keyed) headers.authorization = `Bearer ${config.apiKey}`
-    const res = await fetch(`${base}/api${path}`, { method: body ? 'POST' : 'GET', headers, body: body ? JSON.stringify(body) : undefined })
+    const res = await fetch(`${base}/api${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined })
     if ((res.status === 429 || res.status >= 500) && attempt < 4) {
       if ((await res.clone().text()).includes('Monthly quota')) return res
       await sleep(Number(res.headers.get('retry-after')) * 1000 || 1000 * 2 ** attempt)
@@ -110,9 +110,26 @@ export async function propose(tx: Tx, hash: Hex, delegate: Address, signature: H
 }
 
 /** One owner naming `delegate` a proposer: for one Safe, or (safe null) every Safe the delegator owns. */
-export type Delegation = { safe: Address | null; delegate: Address; delegator: Address; expiryDate: string | null }
+export type Delegation = { safe: Address | null; delegate: Address; delegator: Address; label: string; expiryDate: string | null }
 
 /** Every delegation naming `delegate` on this chain, expired ones included (the service lists those too). */
 export async function delegations(chainId: number, delegate: Address): Promise<Delegation[]> {
   return list<Delegation>(chainId, `/v2/delegates/?delegate=${delegate}&limit=100`)
+}
+
+/** The proposers named for this one Safe, as Safe{Wallet} lists them: expired ones and a former owner's included. */
+export async function proposers(chainId: number, safe: Address): Promise<Delegation[]> {
+  return list<Delegation>(chainId, `/v2/delegates/?safe=${safe}&limit=100`)
+}
+
+/** `delegator`, an owner, names `delegate` a proposer of `safe` (again with the same delegator: just a new label). */
+export async function addProposer(chainId: number, p: { safe: Address; delegate: Address; delegator: Address; label: string; signature: Hex }): Promise<void> {
+  const res = await api(chainId, '/v2/delegates/', p)
+  if (!res.ok) await fail(res)
+}
+
+/** Ends what `delegator` named: signed by that delegator or by the proposer itself. One already gone is fine. */
+export async function removeProposer(chainId: number, p: { safe: Address; delegate: Address; delegator: Address; signature: Hex }): Promise<void> {
+  const res = await api(chainId, `/v2/delegates/${p.delegate}/`, { safe: p.safe, delegator: p.delegator, signature: p.signature }, 'DELETE')
+  if (!res.ok && res.status !== 404) await fail(res)
 }

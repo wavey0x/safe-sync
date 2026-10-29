@@ -157,6 +157,19 @@ try {
   await until(`document.querySelectorAll('.chips .pick').length >= 14 && !document.querySelector('.busy')`, 'the Safe on every chain')
   await hover('.pick', 'base')
   await shot('5-synced', 'main > .card, .tip.on', 'main > .card')
+
+  // 6. Proposers: the sandbox's keeper bot is missing on three chains, and one more is about to go on all of them.
+  await as(OWNERS[3].address)
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 0, y: 0 })
+  await click('Continue')
+  await until(`document.querySelector('.segs')`, 'Build Txn')
+  await click('Proposers')
+  await until(`[...document.querySelectorAll('main button')].some(b => b.textContent.trim() === 'Add to 3')`, 'the proposers')
+  await js(`for (const [label, v] of [['Proposer to add', '0xdF3e18d64BC6A983f673Ab319CCaE4f1a57C7097'], ['Its label', 'Deployer']]) {
+    const i = document.querySelector(\`input[aria-label="\${label}"]\`); i.value = v; i.dispatchEvent(new Event('input'))
+  }`)
+  await until(`document.querySelector('.footer .primary')?.textContent.includes('Add to 14')`, 'Add to 14 Safes')
+  await shot('6-proposers', 'main > .card')
 } finally {
   ws.close(); chrome.kill(); server.stop(true); sb.stop()
   rmSync(profile, { recursive: true, force: true })

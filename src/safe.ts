@@ -476,6 +476,19 @@ export function walletTypedData(tx: Tx): string {
   })
 }
 
+// What an owner signs to add or remove a proposer (a Safe{Wallet} delegate). The Safe service also takes it without a
+// chain id (safe-transaction-service #2116, in every release since 5.0), so one signature serves every chain's service.
+// totp counts hours: the service takes this hour's and the last one's, so a signature lasts one to two hours.
+export const totpNow = () => Math.floor(Date.now() / 3_600_000)
+const DELEGATE_TYPES = { Delegate: [{ name: 'delegateAddress', type: 'address' }, { name: 'totp', type: 'uint256' }] } as const
+const DELEGATE_DOMAIN = { name: 'Safe Transaction Service', version: '1.0' } as const
+export const delegateHash = (delegate: Address, totp: number): Hex =>
+  hashTypedData({ domain: DELEGATE_DOMAIN, types: DELEGATE_TYPES, primaryType: 'Delegate', message: { delegateAddress: delegate, totp: BigInt(totp) } })
+export const delegateTypedData = (delegate: Address, totp: number): string => JSON.stringify({
+  types: { EIP712Domain: [{ name: 'name', type: 'string' }, { name: 'version', type: 'string' }], ...DELEGATE_TYPES },
+  domain: DELEGATE_DOMAIN, primaryType: 'Delegate', message: { delegateAddress: delegate, totp: String(totp) },
+})
+
 /** Some wallets/hardware return v as 0/1; Safe needs 27/28 for ECDSA signatures. */
 export function normalizeSig(sig: Hex): Hex {
   if (size(sig) !== 65) throw new Error(`Unexpected signature length ${size(sig)}`)
