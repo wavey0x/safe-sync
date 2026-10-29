@@ -307,6 +307,31 @@ export async function readSafe(chainId: number, safe: Address): Promise<SafeStat
   return { version, owners, threshold: Number(threshold), nonce: Number(nonce) }
 }
 
+// Each execTransaction emits one of these and uses the next nonce. txHash is the safeTxHash: indexed in some Safe
+// versions, in the data in others.
+const EXECUTION_TOPICS = ['ExecutionSuccess(bytes32,uint256)', 'ExecutionFailure(bytes32,uint256)'].map(e => keccak256(toHex(e)))
+/**
+ * The safeTxHash that used `nonce`, from the Safe's own execution events: the newest are read first, back to `since`
+ * (ms) at most. Undefined when the chain can't tell.
+ */
+export async function executedAt(chainId: number, safe: Address, nonce: number, since: number): Promise<Hex | undefined> {
+  const c = client(chainId), head = await c.getBlockNumber({ cacheTime: 0 }) // not the few-seconds-old cached one
+  const now = Number(await c.readContract({ address: safe, abi: SAFE_ABI, functionName: 'nonce', blockNumber: head }))
+  const found: Hex[] = [] // newest first: the one that used `nonce` is the (now - nonce)th
+  let to = head, span = 50_000n
+  for (let reads = 0; nonce < now && reads < 40; reads++) {
+    const from = to >= span ? to - span + 1n : 0n
+    let logs: { topics: Hex[]; data: Hex }[]
+    try { logs = await c.request({ method: 'eth_getLogs', params: [{ address: safe, topics: [EXECUTION_TOPICS], fromBlock: toHex(from), toBlock: toHex(to) }] }) as any }
+    catch { if (span <= 1_000n) return undefined; span /= 5n; continue } // RPCs cap the range differently
+    found.push(...logs.reverse().map(l => (l.topics[1] ?? slice(l.data, 0, 32)) as Hex))
+    if (found.length >= now - nonce) return found[now - nonce - 1]
+    if (from === 0n || Number((await c.getBlock({ blockNumber: from })).timestamp) * 1000 < since) return undefined
+    to = from - 1n
+  }
+  return undefined
+}
+
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
 
 const withTimeout = <T>(p: Promise<T>, ms: number) => Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timed out')), ms))])

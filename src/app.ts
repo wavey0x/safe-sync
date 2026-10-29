@@ -7,7 +7,7 @@ import { CHAINS } from './chains'
 import { LOGO } from './logos'
 import {
   applyOps, batchId, chainName, chainOf, client, config, decodeBatch, delegateHash, delegateTypedData, describe, domainHash, encodeBatch, execData,
-  findSafe, linesFromTx, linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, parseProposersPath, pickNonce, prepareTarget,
+  executedAt, findSafe, linesFromTx, linesFromTxBuilder, messageHash, msg, normalizeSig, onchainHash, parseActions, parseProposersPath, pickNonce, prepareTarget,
   type ProposerChanges, proposersPath, readSafe, resolveNames, ownerOps, revertData, revertReason, SAFE_ABI, safeTxHash, settingsFrom, short, sigOwner, totpNow, walletTypedData, ZERO,
   type Action, type Batch, type Found, type NonceChoice, type OwnerOp, type Prepared, type Queued, type Step, type Target, type Tx,
 } from './safe'
@@ -25,6 +25,7 @@ type Row = {
   proposer?: Address; proposing?: boolean // proposer: the delegate that proposed it, if one did
   others: { safeTxHash: Hex; isExecuted: boolean }[] // other transactions at the same nonce
   phase?: string; error?: string; fatal?: string; execHash?: Hex; execOk?: boolean; open?: boolean
+  executedAs?: Hex | null; checkingExec?: boolean // the safeTxHash the chain says used this nonce (null: it can't tell)
   uploadError?: string // a signature or proposal made here that didn't reach the service
   loaded?: Promise<void>; posting?: Promise<void>
 }
@@ -569,6 +570,12 @@ async function loadRow(r: Row) {
   update()
   if (svc.serviceUrl(r.tx.chainId)) await readService(r)
   else { r.svc = 'none'; await verify(r) }
+  // The nonce is used and the service doesn't say by this transaction: the Safe's own events do (a service can lag).
+  if (r.chainNonce !== undefined && r.chainNonce > r.tx.nonce && !r.svcExecuted && !r.execOk) {
+    r.checkingExec = true; update()
+    r.executedAs = (await executedAt(r.tx.chainId, r.tx.safe, r.tx.nonce, (S.batch?.created ?? 0) - 86_400_000).catch(() => undefined)) ?? null
+    r.checkingExec = false
+  }
   saveSigs(r); update()
   // Outbox: anything signed here that the service doesn't have yet is (re)uploaded.
   if (r.svc === 'ok' && needsWork(r)) for (const s of Object.values(r.sigs)) if (!s.posted) post(r, s)
@@ -658,9 +665,9 @@ function status(r: Row): { kind: Kind; text: string; detail?: string } {
   if (r.fatal) return { kind: 'blocked', text: 'hash mismatch', detail: r.fatal }
   if (r.chainNonce === undefined) return r.error ? { kind: 'unknown', text: "couldn't read the chain" } : { kind: 'loading', text: 'loading…' }
   if (r.chainNonce > r.tx.nonce) {
-    if (r.svcExecuted || r.execOk) return { kind: 'executed', text: 'executed' }
-    if (r.svc === 'loading' || r.execHash) return { kind: 'loading', text: 'checking…' }
-    if (r.svc === 'ok') return { kind: 'blocked', text: `nonce ${r.tx.nonce} was used by another transaction` }
+    if (r.svcExecuted || r.execOk || r.executedAs?.toLowerCase() === r.hash.toLowerCase()) return { kind: 'executed', text: 'executed' }
+    if (r.svc === 'loading' || r.execHash || r.checkingExec) return { kind: 'loading', text: 'checking…' }
+    if (r.executedAs || r.others.some(o => o.isExecuted)) return { kind: 'blocked', text: `nonce ${r.tx.nonce} was used by another transaction` }
     return { kind: 'unknown', text: `nonce ${r.tx.nonce} is used; can't confirm it was this transaction` }
   }
   if (r.execHash) return { kind: 'waiting', text: 'executing…' }

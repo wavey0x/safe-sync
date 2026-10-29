@@ -3,7 +3,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { createWalletClient, encodeFunctionData, http, parseAbi, publicActions, type Address, type Hex } from 'viem'
 import {
-  config, delegateTypedData, execData, findSafe, normalizeSig, parseActions, parseTargets, payloadKey, pickNonce, prepareTarget, readSafe, safeTxHash, sigOwner,
+  config, delegateTypedData, execData, executedAt, findSafe, normalizeSig, parseActions, parseTargets, payloadKey, pickNonce, prepareTarget, readSafe, safeTxHash, sigOwner,
   totpNow, walletTypedData, type NonceChoice, type Prepared, type Tx,
 } from '../src/safe'
 import * as svc from '../src/service'
@@ -99,6 +99,9 @@ test.skipIf(!enabled)('five owners sign everything through the service, then one
     expect(after.owners).not.toContain(OWNERS[0].address)
     expect(after.nonce).toBe(tx.nonce + 1)
     expect((await svc.getTx(tx.chainId, hash))!.isExecuted).toBe(true)
+    // The chain says the same without the service: this transaction used the nonce, and the next one is unused.
+    expect(await executedAt(tx.chainId, tx.safe, tx.nonce, 0)).toBe(hash)
+    expect(await executedAt(tx.chainId, tx.safe, tx.nonce + 1, 0)).toBeUndefined()
   }
   expect(new Set(ready.map(p => p.chainId)).size).toBe(CHAIN_IDS.length - 1) // every chain except Linea, already done
 }, 180_000)
