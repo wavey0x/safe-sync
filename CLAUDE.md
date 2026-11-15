@@ -2,7 +2,9 @@
 
 ## Checking a change in the browser
 
-- Only for changes you can see, and only the screen that changed. Logic is `bun test`'s job (about 5 s).
+- Only for changes you can see: one quick look at the screen that changed. Logic is `bun test`'s job
+  (about 3 s). Don't replay flows in the browser to test behavior (signing rounds, queues, who may do what);
+  if a test doesn't cover it, add one.
 - Use the fast sandbox: `bun run sandbox:fast` (launch configuration `sandbox-fast`). It has no Safe service
   pacing or throttling, and the sandbox wallet answers at once.
 - Keep it running. It serves `dist/safe-sync.html` fresh on every request, so `bun run build` and reload.
@@ -18,5 +20,5 @@
 
 ## README screenshots
 
-- `bun run screenshots` retakes `docs/*.png` from the sandbox in headless Chrome (about 10 s). Run it
-  when a screen they show changes, and commit them with that change.
+- `bun run screenshots` retakes `docs/*.png` from the sandbox in headless Chrome (about 20 s). Run it
+  only when a screen they show changes, and commit them with that change. It isn't a way to check a change.
